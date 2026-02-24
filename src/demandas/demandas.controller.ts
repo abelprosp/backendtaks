@@ -22,6 +22,7 @@ import { UpdateDemandaDto } from './dto/update-demanda.dto';
 import { ListDemandasFiltersDto } from './dto/list-demandas-filters.dto';
 import { CreateDemandaFromTemplateDto } from '../templates/dto/create-demanda-from-template.dto';
 import { BuscarIaDto } from './dto/buscar-ia.dto';
+import { AdminGuard } from '../auth/admin.guard';
 import { stringToBool } from './utils';
 
 @Controller('demandas')
@@ -49,6 +50,12 @@ export class DemandasController {
     @Body() dto: BuscarIaDto,
   ) {
     return this.demandasService.buscarIa(req.user.id, dto.query);
+  }
+
+  @Get('dashboard-kpis')
+  @UseGuards(AdminGuard)
+  async getDashboardKpis(@Req() req: { user: { id: string } }, @Query('avaliar_ia') avaliarIa?: string) {
+    return this.demandasService.getDashboardKpis(req.user.id, avaliarIa === 'true');
   }
 
   @Get()

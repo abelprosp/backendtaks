@@ -13,8 +13,19 @@ import { ListDemandasFiltersDto } from './dto/list-demandas-filters.dto';
 import { CreateDemandaFromTemplateDto } from '../templates/dto/create-demanda-from-template.dto';
 import type { DemandaStatus } from '../types/enums';
 
+function computeTempoHoras(from: string | Date | null, to: string | Date | null): number | null {
+  if (!from || !to) return null;
+  const a = new Date(from).getTime();
+  const b = new Date(to).getTime();
+  return Math.round((b - a) / (1000 * 60 * 60) * 10) / 10;
+}
+
 function mapDemandaList(row: any, criador?: any, responsaveis?: any[], setores?: any[], clientes?: any[]) {
   if (!row) return null;
+  const resolvidoEm = row.resolvido_em ?? null;
+  const ultimaObservacaoEm = row.ultima_observacao_em ?? null;
+  const createdAt = row.created_at;
+  const now = new Date().toISOString();
   return {
     id: row.id,
     protocolo: row.protocolo,
@@ -26,8 +37,12 @@ function mapDemandaList(row: any, criador?: any, responsaveis?: any[], setores?:
     observacoesGerais: row.observacoes_gerais,
     isRecorrente: row.is_recorrente,
     demandaOrigemId: row.demanda_origem_id,
-    createdAt: row.created_at,
+    createdAt,
     updatedAt: row.updated_at,
+    resolvidoEm: resolvidoEm || undefined,
+    ultimaObservacaoEm: ultimaObservacaoEm || undefined,
+    tempoResolucaoHoras: resolvidoEm ? computeTempoHoras(createdAt, resolvidoEm) : null,
+    tempoDesdeUltimaObservacaoHoras: ultimaObservacaoEm ? computeTempoHoras(ultimaObservacaoEm, now) : null,
     criador: criador ? { id: criador.id, name: criador.name, email: criador.email } : undefined,
     responsaveis: responsaveis ?? [],
     setores: setores ?? [],
@@ -80,7 +95,7 @@ export class DemandasService {
         const c = await sb.from('Cliente').select('id, name').in('id', ids);
         return (c.data ?? []).map((x: any) => ({ cliente: x }));
       }),
-      detail ? sb.from('subtarefa').select('*').eq('demanda_id', demandaId) : Promise.resolve({ data: [] }),
+      detail ? sb.from('subtarefa').select('*').eq('demanda_id', demandaId).order('ordem', { ascending: true }).order('id', { ascending: true }) : Promise.resolve({ data: [] }),
       detail ? sb.from('observacao').select('*').eq('demanda_id', demandaId).order('created_at', { ascending: false }).then(async (r) => {
         const list = r.data ?? [];
         if (!list.length) return { data: [] };
@@ -126,7 +141,7 @@ export class DemandasService {
     if (dto.setores?.length) await sb.from('demanda_setor').insert(dto.setores.map((setorId) => ({ demanda_id: demanda.id, setor_id: setorId })));
     if (dto.clienteIds?.length) await sb.from('demanda_cliente').insert(dto.clienteIds.map((clienteId) => ({ demanda_id: demanda.id, cliente_id: clienteId })));
     if (dto.responsaveis?.length) await sb.from('demanda_responsavel').insert(dto.responsaveis.map((r) => ({ demanda_id: demanda.id, user_id: r.userId, is_principal: r.isPrincipal ?? false })));
-    if (dto.subtarefas?.length) await sb.from('subtarefa').insert(dto.subtarefas.map((t) => ({ demanda_id: demanda.id, titulo: t.titulo })));
+    if (dto.subtarefas?.length) await sb.from('subtarefa').insert(dto.subtarefas.map((t, i) => ({ demanda_id: demanda.id, titulo: t.titulo, ordem: (t as any).ordem ?? i })));
     if (dto.isRecorrente && dto.recorrencia) {
       await sb.from('recorrencia_config').insert({
         demanda_id: demanda.id,
@@ -168,7 +183,7 @@ export class DemandasService {
     if (setorIds.length) await sb.from('demanda_setor').insert(setorIds.map((setorId: string) => ({ demanda_id: demanda.id, setor_id: setorId })));
     if (dto.clienteIds?.length) await sb.from('demanda_cliente').insert(dto.clienteIds.map((clienteId) => ({ demanda_id: demanda.id, cliente_id: clienteId })));
     if (responsaveisDto.length) await sb.from('demanda_responsavel').insert(responsaveisDto.map((r: any) => ({ demanda_id: demanda.id, user_id: r.userId, is_principal: r.isPrincipal ?? false })));
-    if (template.subtarefas?.length) await sb.from('subtarefa').insert(template.subtarefas.map((t: any) => ({ demanda_id: demanda.id, titulo: t.titulo ?? t.titulo })));
+    if (template.subtarefas?.length) await sb.from('subtarefa').insert(template.subtarefas.map((t: any, i: number) => ({ demanda_id: demanda.id, titulo: t.titulo ?? t.titulo, ordem: t.ordem ?? i })));
     if (isRecorrente && dto.recorrenciaDataBase && template.recorrenciaTipo) {
       await sb.from('recorrencia_config').insert({
         demanda_id: demanda.id,
@@ -266,7 +281,10 @@ export class DemandasService {
     if (dto.assunto != null) upd.assunto = dto.assunto;
     if (dto.prioridade !== undefined) upd.prioridade = dto.prioridade;
     if (dto.prazo != null) upd.prazo = dto.prazo;
-    if (newStatus) upd.status = newStatus;
+    if (newStatus) {
+      upd.status = newStatus;
+      if (newStatus === 'concluido') upd.resolvido_em = new Date().toISOString();
+    }
     if (dto.observacoesGerais !== undefined) upd.observacoes_gerais = dto.observacoesGerais;
     if (Object.keys(upd).length) await sb.from('Demanda').update(upd).eq('id', id);
 
@@ -284,7 +302,7 @@ export class DemandasService {
     }
     if (dto.subtarefas) {
       await sb.from('subtarefa').delete().eq('demanda_id', id);
-      if (dto.subtarefas.length) await sb.from('subtarefa').insert(dto.subtarefas.map((t) => ({ demanda_id: id, titulo: t.titulo, concluida: t.concluida ?? false })));
+      if (dto.subtarefas.length) await sb.from('subtarefa').insert(dto.subtarefas.map((t, i) => ({ demanda_id: id, titulo: t.titulo, concluida: t.concluida ?? false, ordem: (t as any).ordem ?? i })));
     }
     return this.findOne(userId, id);
   }
@@ -294,7 +312,9 @@ export class DemandasService {
     const sb = this.supabase.getClient();
     const isResponsavel = await this.isResponsavelPrincipal(userId, demandaId);
     await sb.from('observacao').insert({ demanda_id: demandaId, user_id: userId, texto });
-    if (!isResponsavel) await sb.from('Demanda').update({ status: 'pendente_de_resposta' }).eq('id', demandaId);
+    const demandaUpd: { status?: string; ultima_observacao_em: string } = { ultima_observacao_em: new Date().toISOString() };
+    if (!isResponsavel) demandaUpd.status = 'pendente_de_resposta';
+    await sb.from('Demanda').update(demandaUpd).eq('id', demandaId);
     return this.findOne(userId, demandaId);
   }
 
@@ -442,5 +462,105 @@ Se o usuário mencionar um nome (ex: "Comercial", "João"), use o id corresponde
     if (typeof parsed.prazoAte === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.prazoAte)) filters.prazoAte = parsed.prazoAte;
 
     return { filters };
+  }
+
+  /** Dashboard KPIs para usuário master: métricas de tempo de resolução e atualização, e opcional avaliação por IA. */
+  async getDashboardKpis(userId: string, avaliarComIa: boolean): Promise<{
+    metricas: {
+      totalDemandas: number;
+      concluidas: number;
+      emAberto: number;
+      tempoMedioResolucaoHoras: number | null;
+      demandasSemObservacaoRecente: number;
+      tempoMedioDesdeUltimaObservacaoHoras: number | null;
+      porStatus: Record<string, number>;
+    };
+    avaliacaoIa?: { resumo: string; kpis: { nome: string; situacao: 'ok' | 'desconto_leve' | 'desconto_grave'; comentario: string }[] };
+  }> {
+    const sb = this.supabase.getClient();
+    const { data: rows } = await sb
+      .from('Demanda')
+      .select('id, status, created_at, updated_at, resolvido_em, ultima_observacao_em')
+      .order('created_at', { ascending: false })
+      .limit(5000);
+    const list = rows ?? [];
+
+    const concluidas = list.filter((r: any) => r.status === 'concluido');
+    const comResolvidoEm = concluidas.filter((r: any) => r.resolvido_em);
+    const temposResolucao = comResolvidoEm.map((r: any) => computeTempoHoras(r.created_at, r.resolvido_em)).filter((x): x is number => x != null);
+    const tempoMedioResolucaoHoras = temposResolucao.length ? temposResolucao.reduce((a, b) => a + b, 0) / temposResolucao.length : null;
+
+    const comUltimaObs = list.filter((r: any) => r.ultima_observacao_em);
+    const agora = new Date().toISOString();
+    const temposDesdeObs = comUltimaObs.map((r: any) => computeTempoHoras(r.ultima_observacao_em, agora)).filter((x): x is number => x != null);
+    const tempoMedioDesdeUltimaObservacaoHoras = temposDesdeObs.length ? temposDesdeObs.reduce((a, b) => a + b, 0) / temposDesdeObs.length : null;
+    const demandasSemObservacaoRecente = list.filter((r: any) => !r.ultima_observacao_em || computeTempoHoras(r.ultima_observacao_em, agora) > 24 * 7).length;
+
+    const porStatus: Record<string, number> = {};
+    list.forEach((r: any) => { porStatus[r.status] = (porStatus[r.status] || 0) + 1; });
+
+    const metricas = {
+      totalDemandas: list.length,
+      concluidas: concluidas.length,
+      emAberto: list.filter((r: any) => r.status === 'em_aberto').length,
+      tempoMedioResolucaoHoras: tempoMedioResolucaoHoras != null ? Math.round(tempoMedioResolucaoHoras * 10) / 10 : null,
+      demandasSemObservacaoRecente,
+      tempoMedioDesdeUltimaObservacaoHoras: tempoMedioDesdeUltimaObservacaoHoras != null ? Math.round(tempoMedioDesdeUltimaObservacaoHoras * 10) / 10 : null,
+      porStatus,
+    };
+
+    let avaliacaoIa: { resumo: string; kpis: { nome: string; situacao: 'ok' | 'desconto_leve' | 'desconto_grave'; comentario: string }[] } | undefined;
+    if (avaliarComIa && process.env.OPENAI_API_KEY) {
+      const kpiTable = `SUGESTÕES KPIs (referência):
+- Envio faturas/cobranças/NF clientes no prazo: desconto leve até 24h após; grave >24h.
+- Cobranças inadimplentes: leve 5/10 dias e bloqueios mensais; grave >1 mês.
+- Tempo médio atendimento suporte técnico: leve 8–10 min; grave >15 min.
+- Tempo médio atendimento: leve 8–10 min; grave >10 min.
+- Envio contratos: leve 24–36h úteis; grave >36h.
+- Solicitações fidelidades/operadoras: leve 24–36h úteis; grave >36h.
+- Acompanhamento assinaturas: leve 24–36h; grave >36h.
+- Avaliação atendimento: leve média 6–7; grave <6.
+- Cadastro/ajustes linhas até sexta: leve até segunda; grave após segunda.
+- Entrega relatórios no prazo: leve até 24h após; grave >5 dias.
+- Documentação operadoras: leve sem erro com custo; grave ≥1 erro.
+- Envio faturas (Assessoria/Fixo): leve até 24h após; grave >48h.
+- Atualização Vivo Gestão: leve 24–36h; grave >24h.
+- Atendimento parceiros: leve 8–10 min; grave >15 min.
+- Cálculo cobrança: leve envio com <10 dias até vencimento; grave <5 dias.
+- Contestação/acompanhamento operadoras: leve 24h após; grave >5 dias.`;
+
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: `Você avalia indicadores operacionais com base em métricas de demandas. Retorne um JSON com: "resumo" (string, um parágrafo em português) e "kpis" (array de objetos com "nome" (string), "situacao" ("ok" | "desconto_leve" | "desconto_grave"), "comentario" (string)). Use a tabela de referência para comparar. Se não houver dado suficiente para um KPI, use situacao "ok" e comentario explicando. Retorne APENAS o JSON, sem markdown.`,
+          },
+          {
+            role: 'user',
+            content: `${kpiTable}\n\nMétricas atuais do sistema:\n${JSON.stringify(metricas, null, 2)}\n\nAvalie e retorne o JSON com resumo e kpis.`,
+          },
+        ],
+        temperature: 0.3,
+      });
+      const content = completion.choices[0]?.message?.content?.trim() || '{}';
+      try {
+        const cleaned = content.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
+        const parsed = JSON.parse(cleaned);
+        avaliacaoIa = {
+          resumo: parsed.resumo || 'Avaliação gerada.',
+          kpis: Array.isArray(parsed.kpis) ? parsed.kpis.map((k: any) => ({
+            nome: k.nome || '',
+            situacao: ['ok', 'desconto_leve', 'desconto_grave'].includes(k.situacao) ? k.situacao : 'ok',
+            comentario: k.comentario || '',
+          })) : [],
+        };
+      } catch {
+        avaliacaoIa = { resumo: 'Não foi possível gerar avaliação.', kpis: [] };
+      }
+    }
+
+    return { metricas, avaliacaoIa };
   }
 }

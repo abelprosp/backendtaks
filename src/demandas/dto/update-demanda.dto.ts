@@ -36,5 +36,5 @@ export class UpdateDemandaDto {
 
   @IsOptional()
   @IsArray()
-  subtarefas?: { titulo: string; concluida?: boolean }[];
+  subtarefas?: { titulo: string; concluida?: boolean; ordem?: number }[];
 }

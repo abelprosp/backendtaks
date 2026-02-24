@@ -4,10 +4,20 @@
 -- e execute. Depois rode o seed (seed.sql) se quiser setores e perfis.
 -- ============================================================
 
--- Enums
-CREATE TYPE "RoleSlug" AS ENUM ('admin', 'gestor', 'colaborador', 'cliente');
-CREATE TYPE "DemandaStatus" AS ENUM ('em_aberto', 'concluido', 'pendente', 'pendente_de_resposta');
-CREATE TYPE "RecorrenciaTipo" AS ENUM ('diaria', 'semanal', 'quinzenal', 'mensal');
+-- Enums (cria só se não existir, para poder rodar o script de novo sem erro)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'RoleSlug') THEN
+    CREATE TYPE "RoleSlug" AS ENUM ('admin', 'gestor', 'colaborador', 'cliente');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'DemandaStatus') THEN
+    CREATE TYPE "DemandaStatus" AS ENUM ('em_aberto', 'concluido', 'pendente', 'pendente_de_resposta');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'RecorrenciaTipo') THEN
+    CREATE TYPE "RecorrenciaTipo" AS ENUM ('diaria', 'semanal', 'quinzenal', 'mensal');
+  END IF;
+END
+$$;
 
 -- Tabelas (ordem respeitando FKs)
 CREATE TABLE "User" (
@@ -66,6 +76,8 @@ CREATE TABLE "Demanda" (
   "observacoes_gerais" TEXT,
   "is_recorrente" BOOLEAN NOT NULL DEFAULT false,
   "demanda_origem_id" UUID REFERENCES "Demanda"("id"),
+  "resolvido_em" TIMESTAMP(3),
+  "ultima_observacao_em" TIMESTAMP(3),
   "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updated_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -93,7 +105,8 @@ CREATE TABLE "subtarefa" (
   "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   "demanda_id" UUID NOT NULL REFERENCES "Demanda"("id") ON DELETE CASCADE,
   "titulo" TEXT NOT NULL,
-  "concluida" BOOLEAN NOT NULL DEFAULT false
+  "concluida" BOOLEAN NOT NULL DEFAULT false,
+  "ordem" INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE "observacao" (
