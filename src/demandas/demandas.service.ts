@@ -494,7 +494,11 @@ Se o usuário mencionar um nome (ex: "Comercial", "João"), use o id corresponde
     const agora = new Date().toISOString();
     const temposDesdeObs = comUltimaObs.map((r: any) => computeTempoHoras(r.ultima_observacao_em, agora)).filter((x): x is number => x != null);
     const tempoMedioDesdeUltimaObservacaoHoras = temposDesdeObs.length ? temposDesdeObs.reduce((a, b) => a + b, 0) / temposDesdeObs.length : null;
-    const demandasSemObservacaoRecente = list.filter((r: any) => !r.ultima_observacao_em || computeTempoHoras(r.ultima_observacao_em, agora) > 24 * 7).length;
+    const demandasSemObservacaoRecente = list.filter((r: any) => {
+      const ultima = r.ultima_observacao_em as string | null | undefined;
+      if (ultima == null) return true;
+      return (computeTempoHoras(ultima, agora) ?? 0) > 24 * 7;
+    }).length;
 
     const porStatus: Record<string, number> = {};
     list.forEach((r: any) => { porStatus[r.status] = (porStatus[r.status] || 0) + 1; });
