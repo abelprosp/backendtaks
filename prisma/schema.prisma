@@ -1,0 +1,244 @@
+// Luxus Tasks - Schema do Banco de Dados
+// https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum RoleSlug {
+  admin
+  gestor
+  colaborador
+  cliente
+}
+
+enum DemandaStatus {
+  em_aberto
+  concluido
+  pendente
+  pendente_de_resposta
+}
+
+enum RecorrenciaTipo {
+  diaria
+  semanal
+  quinzenal
+  mensal
+}
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String   @map("password_hash")
+  name          String
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  roles         UserRole[]
+  setorPermissoes UserSetorPermissao[]
+  demandasCriadas Demanda[] @relation("DemandaCriador")
+  demandasResponsavel DemandaResponsavel[]
+  observacoes   Observacao[]
+  templatesCriados Template[]
+  templateResponsavel TemplateResponsavel[]
+}
+
+model Role {
+  id    String   @id @default(uuid())
+  name  String
+  slug  RoleSlug @unique
+  users UserRole[]
+}
+
+model UserRole {
+  userId String @map("user_id")
+  roleId String @map("role_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  @@id([userId, roleId])
+  @@map("user_role")
+}
+
+model Setor {
+  id             String   @id @default(uuid())
+  name           String
+  slug           String   @unique
+  demandas       DemandaSetor[]
+  permissoes     UserSetorPermissao[]
+  templateSetores TemplateSetor[]
+}
+
+model UserSetorPermissao {
+  id        String  @id @default(uuid())
+  userId    String  @map("user_id")
+  setorId   String  @map("setor_id")
+  canCreate Boolean @default(false) @map("can_create")
+  canEdit   Boolean @default(false) @map("can_edit")
+  canDelete Boolean @default(false) @map("can_delete")
+  canView   Boolean @default(true)  @map("can_view")
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  setor  Setor  @relation(fields: [setorId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, setorId])
+  @@map("user_setor_permissao")
+}
+
+model Cliente {
+  id        String   @id @default(uuid())
+  name      String
+  active    Boolean  @default(true)
+  demandas  DemandaCliente[]
+}
+
+model Demanda {
+  id                String    @id @default(uuid())
+  protocolo         String    @unique
+  assunto           String
+  prioridade        Boolean   @default(false)
+  prazo             DateTime? @db.Date
+  status            DemandaStatus @default(em_aberto)
+  criadorId         String    @map("criador_id")
+  observacoesGerais String?   @map("observacoes_gerais") @db.Text
+  isRecorrente      Boolean   @default(false) @map("is_recorrente")
+  demandaOrigemId   String?   @map("demanda_origem_id")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  criador           User      @relation("DemandaCriador", fields: [criadorId], references: [id])
+  demandaOrigem     Demanda?  @relation("DemandaRecorrencia", fields: [demandaOrigemId], references: [id])
+  demandasGeradas   Demanda[] @relation("DemandaRecorrencia")
+
+  setores           DemandaSetor[]
+  clientes          DemandaCliente[]
+  responsaveis      DemandaResponsavel[]
+  subtarefas        Subtarefa[]
+  observacoes       Observacao[]
+  anexos            Anexo[]
+  recorrenciaConfig RecorrenciaConfig?
+}
+
+model DemandaSetor {
+  demandaId String @map("demanda_id")
+  setorId   String @map("setor_id")
+  demanda   Demanda @relation(fields: [demandaId], references: [id], onDelete: Cascade)
+  setor     Setor   @relation(fields: [setorId], references: [id], onDelete: Cascade)
+  @@id([demandaId, setorId])
+  @@map("demanda_setor")
+}
+
+model DemandaCliente {
+  id        String  @id @default(uuid())
+  demandaId String  @map("demanda_id")
+  clienteId String  @map("cliente_id")
+  demanda   Demanda @relation(fields: [demandaId], references: [id], onDelete: Cascade)
+  cliente   Cliente @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  @@map("demanda_cliente")
+}
+
+model DemandaResponsavel {
+  id           String  @id @default(uuid())
+  demandaId    String  @map("demanda_id")
+  userId       String  @map("user_id")
+  isPrincipal  Boolean @default(false) @map("is_principal")
+  demanda      Demanda @relation(fields: [demandaId], references: [id], onDelete: Cascade)
+  user         User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@map("demanda_responsavel")
+}
+
+model Subtarefa {
+  id        String   @id @default(uuid())
+  demandaId String   @map("demanda_id")
+  titulo    String
+  concluida Boolean  @default(false)
+  demanda   Demanda  @relation(fields: [demandaId], references: [id], onDelete: Cascade)
+  @@map("subtarefa")
+}
+
+model Observacao {
+  id        String   @id @default(uuid())
+  demandaId String   @map("demanda_id")
+  userId    String   @map("user_id")
+  texto     String   @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+  demanda   Demanda  @relation(fields: [demandaId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@map("observacao")
+}
+
+model Anexo {
+  id          String   @id @default(uuid())
+  demandaId   String   @map("demanda_id")
+  filename    String   @map("filename")
+  mimeType    String   @map("mime_type")
+  size        Int
+  storagePath String   @map("storage_path")
+  demanda     Demanda  @relation(fields: [demandaId], references: [id], onDelete: Cascade)
+  @@map("anexo")
+}
+
+model RecorrenciaConfig {
+  id                    String        @id @default(uuid())
+  demandaId             String        @unique @map("demanda_id")
+  dataBase              DateTime      @map("data_base") @db.Date
+  tipo                  RecorrenciaTipo
+  prazoReaberturaDias    Int           @map("prazo_reabertura_dias")
+  demanda               Demanda       @relation(fields: [demandaId], references: [id], onDelete: Cascade)
+  @@map("recorrencia_config")
+}
+
+// ---------- Templates (estrutura reutilizável para criar demandas) ----------
+model Template {
+  id                          String    @id @default(uuid())
+  name                        String    @map("name")
+  descricao                   String?   @map("descricao") @db.Text
+  assuntoTemplate             String?   @map("assunto_template") @db.Text
+  prioridadeDefault           Boolean   @default(false) @map("prioridade_default")
+  observacoesGeraisTemplate   String?   @map("observacoes_gerais_template") @db.Text
+  isRecorrenteDefault         Boolean   @default(false) @map("is_recorrente_default")
+  recorrenciaTipo             RecorrenciaTipo? @map("recorrencia_tipo")
+  recorrenciaPrazoReaberturaDias Int?   @map("recorrencia_prazo_reabertura_dias")
+  criadorId                   String    @map("criador_id")
+  createdAt                   DateTime  @default(now()) @map("created_at")
+  updatedAt                   DateTime  @updatedAt @map("updated_at")
+
+  criador         User                  @relation(fields: [criadorId], references: [id], onDelete: Cascade)
+  setores         TemplateSetor[]
+  responsaveis    TemplateResponsavel[]
+  subtarefas      TemplateSubtarefa[]
+}
+
+model TemplateSetor {
+  templateId String @map("template_id")
+  setorId    String @map("setor_id")
+  template   Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  setor      Setor    @relation(fields: [setorId], references: [id], onDelete: Cascade)
+  @@id([templateId, setorId])
+  @@map("template_setor")
+}
+
+model TemplateResponsavel {
+  id           String  @id @default(uuid())
+  templateId  String  @map("template_id")
+  userId       String  @map("user_id")
+  isPrincipal  Boolean @default(false) @map("is_principal")
+  template     Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@map("template_responsavel")
+}
+
+model TemplateSubtarefa {
+  id         String   @id @default(uuid())
+  templateId String   @map("template_id")
+  titulo     String   @map("titulo")
+  ordem      Int      @default(0) @map("ordem")
+  template   Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  @@map("template_subtarefa")
+}

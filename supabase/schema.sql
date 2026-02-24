@@ -1,0 +1,181 @@
+-- ============================================================
+-- Luxus Tasks - Schema SQL para Supabase
+-- Cole este conteúdo no SQL Editor do Supabase (Dashboard > SQL Editor)
+-- e execute. Depois rode o seed (seed.sql) se quiser setores e perfis.
+-- ============================================================
+
+-- Enums
+CREATE TYPE "RoleSlug" AS ENUM ('admin', 'gestor', 'colaborador', 'cliente');
+CREATE TYPE "DemandaStatus" AS ENUM ('em_aberto', 'concluido', 'pendente', 'pendente_de_resposta');
+CREATE TYPE "RecorrenciaTipo" AS ENUM ('diaria', 'semanal', 'quinzenal', 'mensal');
+
+-- Tabelas (ordem respeitando FKs)
+CREATE TABLE "User" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "email" TEXT NOT NULL UNIQUE,
+  "password_hash" TEXT NOT NULL,
+  "name" TEXT NOT NULL,
+  "active" BOOLEAN NOT NULL DEFAULT true,
+  "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updated_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE "Role" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "name" TEXT NOT NULL,
+  "slug" "RoleSlug" NOT NULL UNIQUE
+);
+
+CREATE TABLE "user_role" (
+  "user_id" UUID NOT NULL REFERENCES "User"("id") ON DELETE CASCADE,
+  "role_id" UUID NOT NULL REFERENCES "Role"("id") ON DELETE CASCADE,
+  PRIMARY KEY ("user_id", "role_id")
+);
+
+CREATE TABLE "Setor" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "name" TEXT NOT NULL,
+  "slug" TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE "user_setor_permissao" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "user_id" UUID NOT NULL REFERENCES "User"("id") ON DELETE CASCADE,
+  "setor_id" UUID NOT NULL REFERENCES "Setor"("id") ON DELETE CASCADE,
+  "can_create" BOOLEAN NOT NULL DEFAULT false,
+  "can_edit" BOOLEAN NOT NULL DEFAULT false,
+  "can_delete" BOOLEAN NOT NULL DEFAULT false,
+  "can_view" BOOLEAN NOT NULL DEFAULT true,
+  UNIQUE ("user_id", "setor_id")
+);
+
+CREATE TABLE "Cliente" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "name" TEXT NOT NULL,
+  "active" BOOLEAN NOT NULL DEFAULT true
+);
+
+CREATE TABLE "Demanda" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "protocolo" TEXT NOT NULL UNIQUE,
+  "assunto" TEXT NOT NULL,
+  "prioridade" BOOLEAN NOT NULL DEFAULT false,
+  "prazo" DATE,
+  "status" "DemandaStatus" NOT NULL DEFAULT 'em_aberto',
+  "criador_id" UUID NOT NULL REFERENCES "User"("id"),
+  "observacoes_gerais" TEXT,
+  "is_recorrente" BOOLEAN NOT NULL DEFAULT false,
+  "demanda_origem_id" UUID REFERENCES "Demanda"("id"),
+  "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updated_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE "demanda_setor" (
+  "demanda_id" UUID NOT NULL REFERENCES "Demanda"("id") ON DELETE CASCADE,
+  "setor_id" UUID NOT NULL REFERENCES "Setor"("id") ON DELETE CASCADE,
+  PRIMARY KEY ("demanda_id", "setor_id")
+);
+
+CREATE TABLE "demanda_cliente" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "demanda_id" UUID NOT NULL REFERENCES "Demanda"("id") ON DELETE CASCADE,
+  "cliente_id" UUID NOT NULL REFERENCES "Cliente"("id") ON DELETE CASCADE
+);
+
+CREATE TABLE "demanda_responsavel" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "demanda_id" UUID NOT NULL REFERENCES "Demanda"("id") ON DELETE CASCADE,
+  "user_id" UUID NOT NULL REFERENCES "User"("id") ON DELETE CASCADE,
+  "is_principal" BOOLEAN NOT NULL DEFAULT false
+);
+
+CREATE TABLE "subtarefa" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "demanda_id" UUID NOT NULL REFERENCES "Demanda"("id") ON DELETE CASCADE,
+  "titulo" TEXT NOT NULL,
+  "concluida" BOOLEAN NOT NULL DEFAULT false
+);
+
+CREATE TABLE "observacao" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "demanda_id" UUID NOT NULL REFERENCES "Demanda"("id") ON DELETE CASCADE,
+  "user_id" UUID NOT NULL REFERENCES "User"("id") ON DELETE CASCADE,
+  "texto" TEXT NOT NULL,
+  "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE "anexo" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "demanda_id" UUID NOT NULL REFERENCES "Demanda"("id") ON DELETE CASCADE,
+  "filename" TEXT NOT NULL,
+  "mime_type" TEXT NOT NULL,
+  "size" INTEGER NOT NULL,
+  "storage_path" TEXT NOT NULL
+);
+
+CREATE TABLE "recorrencia_config" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "demanda_id" UUID NOT NULL UNIQUE REFERENCES "Demanda"("id") ON DELETE CASCADE,
+  "data_base" DATE NOT NULL,
+  "tipo" "RecorrenciaTipo" NOT NULL,
+  "prazo_reabertura_dias" INTEGER NOT NULL
+);
+
+-- Templates
+CREATE TABLE "Template" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "name" TEXT NOT NULL,
+  "descricao" TEXT,
+  "assunto_template" TEXT,
+  "prioridade_default" BOOLEAN NOT NULL DEFAULT false,
+  "observacoes_gerais_template" TEXT,
+  "is_recorrente_default" BOOLEAN NOT NULL DEFAULT false,
+  "recorrencia_tipo" "RecorrenciaTipo",
+  "recorrencia_prazo_reabertura_dias" INTEGER,
+  "criador_id" UUID NOT NULL REFERENCES "User"("id") ON DELETE CASCADE,
+  "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updated_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE "template_setor" (
+  "template_id" UUID NOT NULL REFERENCES "Template"("id") ON DELETE CASCADE,
+  "setor_id" UUID NOT NULL REFERENCES "Setor"("id") ON DELETE CASCADE,
+  PRIMARY KEY ("template_id", "setor_id")
+);
+
+CREATE TABLE "template_responsavel" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "template_id" UUID NOT NULL REFERENCES "Template"("id") ON DELETE CASCADE,
+  "user_id" UUID NOT NULL REFERENCES "User"("id") ON DELETE CASCADE,
+  "is_principal" BOOLEAN NOT NULL DEFAULT false
+);
+
+CREATE TABLE "template_subtarefa" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "template_id" UUID NOT NULL REFERENCES "Template"("id") ON DELETE CASCADE,
+  "titulo" TEXT NOT NULL,
+  "ordem" INTEGER NOT NULL DEFAULT 0
+);
+
+-- Índices sugeridos
+CREATE INDEX "Demanda_criador_id_idx" ON "Demanda"("criador_id");
+CREATE INDEX "Demanda_prazo_idx" ON "Demanda"("prazo");
+CREATE INDEX "Demanda_status_idx" ON "Demanda"("status");
+CREATE INDEX "Demanda_created_at_idx" ON "Demanda"("created_at");
+CREATE INDEX "demanda_setor_setor_id_idx" ON "demanda_setor"("setor_id");
+CREATE INDEX "demanda_responsavel_user_id_idx" ON "demanda_responsavel"("user_id");
+CREATE INDEX "observacao_demanda_id_idx" ON "observacao"("demanda_id");
+CREATE INDEX "user_setor_permissao_user_setor_idx" ON "user_setor_permissao"("user_id", "setor_id");
+
+-- Trigger para updated_at (opcional)
+CREATE OR REPLACE FUNCTION update_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW."updated_at" = CURRENT_TIMESTAMP;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "User_updated_at" BEFORE UPDATE ON "User" FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER "Demanda_updated_at" BEFORE UPDATE ON "Demanda" FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE TRIGGER "Template_updated_at" BEFORE UPDATE ON "Template" FOR EACH ROW EXECUTE FUNCTION update_updated_at();
