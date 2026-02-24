@@ -160,8 +160,9 @@ export class DemandasService {
     const prioridade = dto.prioridade ?? template.prioridadeDefault;
     const observacoesGerais = dto.observacoesGerais ?? template.observacoesGeraisTemplate ?? undefined;
     const isRecorrente = !!dto.recorrenciaDataBase && !!template.isRecorrenteDefault && !!template.recorrenciaTipo;
-    const setorIds = template.setores?.map((s: any) => s.setor?.id ?? s.setorId)?.filter(Boolean) ?? [];
-    const responsaveisDto = dto.responsaveis?.length ? dto.responsaveis : template.responsaveis?.map((r: any) => ({ userId: r.userId ?? r.user?.id, isPrincipal: r.isPrincipal ?? false })) ?? [];
+    const setorIds = (dto.setorIds?.length ? dto.setorIds : template.setores?.map((s: any) => s.setor?.id ?? s.setorId)?.filter(Boolean)) ?? [];
+    const responsaveisDto = (dto.responsaveis?.length ? dto.responsaveis : template.responsaveis?.map((r: any) => ({ userId: r.userId ?? r.user?.id, isPrincipal: r.isPrincipal ?? false }))) ?? [];
+    const subtarefasTemplate = (dto.subtarefas?.length ? dto.subtarefas : template.subtarefas?.map((t: any) => ({ titulo: t.titulo ?? t.titulo }))) ?? [];
 
     const sb = this.supabase.getClient();
     const { data: demanda, error } = await sb
@@ -183,7 +184,7 @@ export class DemandasService {
     if (setorIds.length) await sb.from('demanda_setor').insert(setorIds.map((setorId: string) => ({ demanda_id: demanda.id, setor_id: setorId })));
     if (dto.clienteIds?.length) await sb.from('demanda_cliente').insert(dto.clienteIds.map((clienteId) => ({ demanda_id: demanda.id, cliente_id: clienteId })));
     if (responsaveisDto.length) await sb.from('demanda_responsavel').insert(responsaveisDto.map((r: any) => ({ demanda_id: demanda.id, user_id: r.userId, is_principal: r.isPrincipal ?? false })));
-    if (template.subtarefas?.length) await sb.from('subtarefa').insert(template.subtarefas.map((t: any, i: number) => ({ demanda_id: demanda.id, titulo: t.titulo ?? t.titulo, ordem: t.ordem ?? i })));
+    if (subtarefasTemplate.length) await sb.from('subtarefa').insert(subtarefasTemplate.map((t: any, i: number) => ({ demanda_id: demanda.id, titulo: t.titulo, ordem: i })));
     if (isRecorrente && dto.recorrenciaDataBase && template.recorrenciaTipo) {
       await sb.from('recorrencia_config').insert({
         demanda_id: demanda.id,

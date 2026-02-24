@@ -34,10 +34,21 @@ export class CreateDemandaFromTemplateDto {
   @IsUUID('4', { each: true })
   clienteIds?: string[];
 
-  /** Sobrescrever responsáveis do template (opcional) */
+  /** Sobrescrever responsáveis do template (opcional). Se não enviado, usa do template. */
   @IsOptional()
   @IsArray()
   responsaveis?: { userId: string; isPrincipal?: boolean }[];
+
+  /** Sobrescrever setores do template (opcional). Se não enviado, usa do template. */
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  setorIds?: string[];
+
+  /** Sobrescrever subtarefas do template (opcional). Se não enviado, usa do template. */
+  @IsOptional()
+  @IsArray()
+  subtarefas?: { titulo: string }[];
 
   /** Se demanda será recorrente; data base para a recorrência */
   @IsOptional()
