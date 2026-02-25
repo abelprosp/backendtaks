@@ -20,28 +20,39 @@ function computeTempoHoras(from: string | Date | null, to: string | Date | null)
   return Math.round((b - a) / (1000 * 60 * 60) * 10) / 10;
 }
 
+/** Garante que datas sejam sempre ISO string ou null para o frontend não quebrar. */
+function toDateISO(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  return null;
+}
+
 function mapDemandaList(row: any, criador?: any, responsaveis?: any[], setores?: any[], clientes?: any[]) {
   if (!row) return null;
-  const resolvidoEm = row.resolvido_em ?? null;
-  const ultimaObservacaoEm = row.ultima_observacao_em ?? null;
-  const createdAt = row.created_at;
+  const resolvidoEm = toDateISO(row.resolvido_em);
+  const ultimaObservacaoEm = toDateISO(row.ultima_observacao_em);
+  const createdAt = toDateISO(row.created_at) ?? undefined;
   const now = new Date().toISOString();
   return {
     id: row.id,
     protocolo: row.protocolo,
     assunto: row.assunto,
     prioridade: row.prioridade,
-    prazo: row.prazo,
+    prazo: row.prazo != null && row.prazo !== '' ? (toDateISO(row.prazo) ?? (typeof row.prazo === 'string' ? row.prazo : null)) : null,
     status: row.status,
     criadorId: row.criador_id,
     observacoesGerais: row.observacoes_gerais,
     isRecorrente: row.is_recorrente,
     demandaOrigemId: row.demanda_origem_id,
-    createdAt,
-    updatedAt: row.updated_at,
-    resolvidoEm: resolvidoEm || undefined,
-    ultimaObservacaoEm: ultimaObservacaoEm || undefined,
-    tempoResolucaoHoras: resolvidoEm ? computeTempoHoras(createdAt, resolvidoEm) : null,
+    createdAt: createdAt ?? null,
+    updatedAt: toDateISO(row.updated_at) ?? row.updated_at,
+    resolvidoEm: resolvidoEm ?? undefined,
+    ultimaObservacaoEm: ultimaObservacaoEm ?? undefined,
+    tempoResolucaoHoras: resolvidoEm && createdAt ? computeTempoHoras(createdAt, resolvidoEm) : null,
     tempoDesdeUltimaObservacaoHoras: ultimaObservacaoEm ? computeTempoHoras(ultimaObservacaoEm, now) : null,
     criador: criador ? { id: criador.id, name: criador.name, email: criador.email } : undefined,
     responsaveis: responsaveis ?? [],
@@ -102,7 +113,17 @@ export class DemandasService {
         const userIds = [...new Set(list.map((o: any) => o.user_id))];
         const { data: users } = await sb.from('User').select('id, name').in('id', userIds);
         const userMap = new Map((users ?? []).map((u: any) => [u.id, u]));
-        return { data: list.map((o: any) => ({ ...o, user: userMap.get(o.user_id) })) };
+        return {
+          data: list.map((o: any) => {
+            const u = userMap.get(o.user_id);
+            return {
+              id: o.id,
+              texto: o.texto ?? '',
+              createdAt: toDateISO(o.created_at) ?? undefined,
+              user: u ? { id: u.id, name: u.name } : undefined,
+            };
+          }),
+        };
       }) : Promise.resolve({ data: [] }),
       detail ? sb.from('anexo').select('*').eq('demanda_id', demandaId) : Promise.resolve({ data: [] }),
       detail ? sb.from('recorrencia_config').select('*').eq('demanda_id', demandaId).single() : Promise.resolve({ data: null }),
@@ -262,12 +283,15 @@ export class DemandasService {
     const { data: row } = await sb.from('Demanda').select('*').eq('id', id).single();
     if (!row) throw new NotFoundException('Demanda não encontrada');
     const rel = await this.loadDemandaRelations(id, true);
+    const rec = rel.recorrenciaConfig as { data_base?: unknown; tipo?: string; prazo_reabertura_dias?: number } | null;
     return {
       ...mapDemandaList(row, rel.criador, rel.responsaveis, rel.setores, rel.clientes),
       subtarefas: rel.subtarefas,
       observacoes: rel.observacoes,
       anexos: rel.anexos,
-      recorrenciaConfig: rel.recorrenciaConfig,
+      recorrenciaConfig: rec
+        ? { dataBase: toDateISO(rec.data_base) ?? (typeof rec.data_base === 'string' ? rec.data_base : null), tipo: rec.tipo ?? '', prazoReaberturaDias: rec.prazo_reabertura_dias ?? 0 }
+        : null,
     };
   }
 
