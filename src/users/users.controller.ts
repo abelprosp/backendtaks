@@ -15,6 +15,11 @@ export class UsersController {
     return this.usersService.listForDropdown();
   }
 
+  @Get('roles')
+  listRoles() {
+    return this.usersService.listRoles();
+  }
+
   @Get()
   listAll() {
     return this.usersService.listAll();

@@ -41,8 +41,8 @@ export class ListDemandasFiltersDto {
   setorIds?: string[];
 
   @IsOptional()
-  @IsEnum(['vencido', 'no_prazo'])
-  condicaoPrazo?: 'vencido' | 'no_prazo';
+  @IsEnum(['vencido', 'no_prazo', 'finalizada'])
+  condicaoPrazo?: 'vencido' | 'no_prazo' | 'finalizada';
 
   @IsOptional()
   @IsString()

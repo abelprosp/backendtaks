@@ -107,10 +107,27 @@ export class UsersService {
     return rows ?? [];
   }
 
+  async listRoles() {
+    const sb = this.supabase.getClient();
+    const { data: rows } = await sb.from('Role').select('id, name, slug').order('name');
+    return rows ?? [];
+  }
+
   async listAll() {
     const sb = this.supabase.getClient();
     const { data: rows } = await sb.from('User').select('id, name, email, active, created_at').order('name');
-    return rows ?? [];
+    const users = rows ?? [];
+    const { data: allUserRoles } = await sb.from('user_role').select('user_id, role_id');
+    const { data: allRoles } = await sb.from('Role').select('id, name, slug');
+    const roleMap = new Map((allRoles ?? []).map((r: any) => [r.id, r]));
+    const rolesByUser = new Map<string, any[]>();
+    for (const ur of allUserRoles ?? []) {
+      const list = rolesByUser.get(ur.user_id) ?? [];
+      const role = roleMap.get(ur.role_id);
+      if (role) list.push(role);
+      rolesByUser.set(ur.user_id, list);
+    }
+    return users.map((u: any) => ({ ...u, roles: rolesByUser.get(u.id) ?? [] }));
   }
 
   async update(id: string, dto: UpdateUserDto) {
@@ -120,10 +137,29 @@ export class UsersService {
     const upd: { name?: string; active?: boolean } = {};
     if (dto.name != null) upd.name = dto.name.trim();
     if (dto.active !== undefined) upd.active = dto.active;
-    if (Object.keys(upd).length === 0) return { id: row.id, name: row.name, email: row.email, active: row.active, created_at: row.created_at };
-    const { data, error } = await sb.from('User').update(upd).eq('id', id).select('id, name, email, active, created_at').single();
-    if (error) throw new Error(error.message);
-    return data;
+    if (Object.keys(upd).length > 0) {
+      const { error } = await sb.from('User').update(upd).eq('id', id);
+      if (error) throw new Error(error.message);
+    }
+    if (dto.roleIds !== undefined) {
+      await sb.from('user_role').delete().eq('user_id', id);
+      if (dto.roleIds.length > 0) {
+        await sb.from('user_role').insert(dto.roleIds.map((roleId) => ({ user_id: id, role_id: roleId })));
+      }
+    }
+    const { data: roleLinks } = await sb.from('user_role').select('role_id').eq('user_id', id);
+    const roleIds = (roleLinks ?? []).map((r: any) => r.role_id);
+    const { data: roleRows } = roleIds.length
+      ? await sb.from('Role').select('id, name, slug').in('id', roleIds)
+      : { data: [] };
+    return {
+      id: row.id,
+      name: (upd.name ?? row.name) as string,
+      email: row.email,
+      active: (upd.active ?? row.active) as boolean,
+      created_at: row.created_at,
+      roles: roleRows ?? [],
+    };
   }
 
   async remove(id: string) {

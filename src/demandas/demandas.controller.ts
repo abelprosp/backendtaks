@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Post,
   Put,
@@ -92,6 +93,12 @@ export class DemandasController {
     @Body() dto: UpdateDemandaDto,
   ) {
     return this.demandasService.update(req.user.id, id, dto);
+  }
+
+  @Delete(':id')
+  @UseGuards(AdminGuard)
+  remove(@Req() req: { user: { id: string } }, @Param('id') id: string) {
+    return this.demandasService.remove(req.user.id, id);
   }
 
   @Post(':id/observacoes')

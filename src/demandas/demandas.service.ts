@@ -264,6 +264,7 @@ export class DemandasService {
     if (filters.prazoAte) q = q.lte('prazo', filters.prazoAte);
     if (filters.condicaoPrazo === 'vencido') q = q.lt('prazo', new Date().toISOString().slice(0, 10));
     if (filters.condicaoPrazo === 'no_prazo') q = q.gte('prazo', new Date().toISOString().slice(0, 10));
+    if (filters.condicaoPrazo === 'finalizada') q = q.eq('status', 'concluido');
     if (filters.dataCriacaoDe) q = q.gte('created_at', filters.dataCriacaoDe);
     if (filters.dataCriacaoAte) q = q.lte('created_at', filters.dataCriacaoAte);
 
@@ -330,6 +331,15 @@ export class DemandasService {
       if (dto.subtarefas.length) await sb.from('subtarefa').insert(dto.subtarefas.map((t, i) => ({ demanda_id: id, titulo: t.titulo, concluida: t.concluida ?? false, ordem: (t as any).ordem ?? i })));
     }
     return this.findOne(userId, id);
+  }
+
+  /** Exclui a demanda (apenas admin). Relacionamentos são removidos em cascata. */
+  async remove(userId: string, id: string) {
+    await this.findOne(userId, id);
+    const sb = this.supabase.getClient();
+    const { error } = await sb.from('Demanda').delete().eq('id', id);
+    if (error) throw new Error(error.message);
+    return { id };
   }
 
   async addObservacao(userId: string, demandaId: string, texto: string) {
@@ -425,7 +435,7 @@ export class DemandasService {
 
     const statusValues = ['em_aberto', 'concluido', 'pendente', 'pendente_de_resposta'];
     const recorrenciaValues = ['diaria', 'semanal', 'quinzenal', 'mensal'];
-    const condicaoPrazoValues = ['vencido', 'no_prazo'];
+    const condicaoPrazoValues = ['vencido', 'no_prazo', 'finalizada'];
 
     const systemPrompt = `Você é um assistente que converte pedidos em português em um objeto JSON de filtros para listar demandas.
 Retorne APENAS um JSON válido, sem markdown e sem texto extra. Use apenas as chaves permitidas.
