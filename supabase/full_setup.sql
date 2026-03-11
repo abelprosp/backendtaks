@@ -1,4 +1,12 @@
 -- ============================================================
+-- Luxus Tasks - Setup completo Supabase (schema + migrations + seed + admin)
+-- Gerado automaticamente a partir dos SQLs do projeto
+-- ============================================================
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- ================= schema.sql =================
+-- ============================================================
 -- Luxus Tasks - Schema SQL para Supabase
 -- Cole este conteúdo no SQL Editor do Supabase (Dashboard > SQL Editor)
 -- e execute. Depois rode o seed (seed.sql) se quiser setores e perfis.
@@ -192,3 +200,104 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER "User_updated_at" BEFORE UPDATE ON "User" FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 CREATE TRIGGER "Demanda_updated_at" BEFORE UPDATE ON "Demanda" FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 CREATE TRIGGER "Template_updated_at" BEFORE UPDATE ON "Template" FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- ================= migrations/add_tempo_resolucao_e_atualizacao.sql =================
+-- Controles de tempo de resolução e atualização por demanda
+-- Tempo de resolução: quando a demanda foi concluída (resolvido_em)
+-- Tempo de atualização com observação: última vez que houve observação (ultima_observacao_em)
+
+ALTER TABLE "Demanda"
+  ADD COLUMN IF NOT EXISTS "resolvido_em" TIMESTAMP(3),
+  ADD COLUMN IF NOT EXISTS "ultima_observacao_em" TIMESTAMP(3);
+
+COMMENT ON COLUMN "Demanda"."resolvido_em" IS 'Data/hora em que a demanda foi concluída (status = concluido)';
+COMMENT ON COLUMN "Demanda"."ultima_observacao_em" IS 'Data/hora da última observação registrada na demanda';
+
+-- ================= migrations/add_subtarefa_ordem.sql =================
+-- Ordem das subtarefas para permitir inserir entre existentes e reordenar
+ALTER TABLE "subtarefa"
+  ADD COLUMN IF NOT EXISTS "ordem" INTEGER NOT NULL DEFAULT 0;
+
+-- Garante que subtarefas existentes tenham ordem sequencial (opcional)
+WITH numbered AS (
+  SELECT id, ROW_NUMBER() OVER (PARTITION BY demanda_id ORDER BY id) - 1 AS rn
+  FROM "subtarefa"
+)
+UPDATE "subtarefa" s SET ordem = numbered.rn FROM numbered WHERE s.id = numbered.id;
+
+-- ================= seed.sql =================
+-- ============================================================
+-- Luxus Tasks - Dados iniciais (opcional)
+-- Execute depois do schema.sql. Insere setores e perfis (roles).
+-- ============================================================
+
+INSERT INTO "Setor" ("id", "name", "slug") VALUES
+  (gen_random_uuid(), 'Assessoria Fixa', 'assessoria_fixa'),
+  (gen_random_uuid(), 'Assessoria Móvel', 'assessoria_movel'),
+  (gen_random_uuid(), 'Comercial', 'comercial'),
+  (gen_random_uuid(), 'Corretora', 'corretora'),
+  (gen_random_uuid(), 'Financeiro', 'financeiro'),
+  (gen_random_uuid(), 'Gestão', 'gestao'),
+  (gen_random_uuid(), 'Jurídico', 'juridico'),
+  (gen_random_uuid(), 'Marketing', 'marketing'),
+  (gen_random_uuid(), 'TI', 'ti'),
+  (gen_random_uuid(), 'Outro', 'outro')
+ON CONFLICT ("slug") DO UPDATE SET "name" = EXCLUDED."name";
+
+INSERT INTO "Role" ("id", "name", "slug") VALUES
+  (gen_random_uuid(), 'Administrador', 'admin'::"RoleSlug"),
+  (gen_random_uuid(), 'Gestor', 'gestor'::"RoleSlug"),
+  (gen_random_uuid(), 'Colaborador', 'colaborador'::"RoleSlug"),
+  (gen_random_uuid(), 'Cliente', 'cliente'::"RoleSlug")
+ON CONFLICT ("slug") DO UPDATE SET "name" = EXCLUDED."name";
+
+-- ================= create-master-user.sql =================
+-- ============================================================
+-- Luxus Tasks - Criar usuário master
+-- Execute no SQL Editor do Supabase (após schema.sql e seed.sql).
+-- Login: redobrai@gmail.com / Amocarro4587@
+-- ============================================================
+
+-- Habilita extensão para bcrypt (Supabase já costuma ter)
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- Insere o usuário master (senha hasheada com bcrypt)
+INSERT INTO "User" ("id", "email", "password_hash", "name", "active", "created_at", "updated_at")
+VALUES (
+  gen_random_uuid(),
+  'redobrai@gmail.com',
+  crypt('Amocarro4587@', gen_salt('bf')),
+  'Master',
+  true,
+  CURRENT_TIMESTAMP,
+  CURRENT_TIMESTAMP
+)
+ON CONFLICT ("email") DO UPDATE SET
+  "password_hash" = EXCLUDED."password_hash",
+  "name" = EXCLUDED."name",
+  "active" = EXCLUDED."active",
+  "updated_at" = CURRENT_TIMESTAMP;
+
+-- Atribui o perfil Administrador ao usuário master
+INSERT INTO "user_role" ("user_id", "role_id")
+SELECT u."id", r."id"
+FROM "User" u
+CROSS JOIN "Role" r
+WHERE u."email" = 'redobrai@gmail.com'
+  AND r."slug" = 'admin'::"RoleSlug"
+ON CONFLICT ("user_id", "role_id") DO NOTHING;
+
+-- ================= set-admin-redobrai.sql =================
+-- ============================================================
+-- Atribui perfil Administrador (master) ao usuário redobrai@gmail.com
+-- Execute no SQL Editor do Supabase. O usuário precisa já existir na tabela "User".
+-- Depois faça login novamente para o sistema reconhecer o perfil e exibir o Dashboard.
+-- ============================================================
+
+INSERT INTO "user_role" ("user_id", "role_id")
+SELECT u."id", r."id"
+FROM "User" u
+CROSS JOIN "Role" r
+WHERE u."email" = 'redobrai@gmail.com'
+  AND r."slug" = 'admin'::"RoleSlug"
+ON CONFLICT ("user_id", "role_id") DO NOTHING;
