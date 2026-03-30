@@ -7,10 +7,10 @@
   },
   "scripts": {
     "build": "npm run prisma:generate && nest build",
-    "start": "node dist/main.js",
+    "start": "node dist/src/main.js",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
-    "start:prod": "node dist/main.js",
+    "start:prod": "node dist/src/main.js",
     "test:ia": "node scripts/test-ia-search.mjs",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
