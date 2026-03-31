@@ -34,6 +34,7 @@ builder.Services.AddScoped<ClientesService>();
 builder.Services.AddScoped<TemplatesService>();
 builder.Services.AddScoped<DemandaVisibilityService>();
 builder.Services.AddScoped<DemandasService>();
+builder.Services.AddScoped<MessageReviewService>();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddCors(options =>

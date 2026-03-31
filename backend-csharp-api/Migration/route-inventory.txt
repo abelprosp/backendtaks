@@ -1,11 +1,12 @@
-ROTAS ATUAIS DO BACKEND NODE AINDA NAO PORTADAS PARA C#
+ROTAS DA API C# PRINCIPAL
 
-Rotas ja portadas na base ASP.NET Core paralela
+Rotas cobertas
 - GET /health
 - POST /auth/login
 - POST /auth/refresh
 - POST /auth/me
 - GET /auth/bootstrap
+- POST /assistente/revisar-mensagem
 - GET /users/dropdown
 - GET /users/roles
 - GET /users
@@ -27,6 +28,7 @@ Rotas ja portadas na base ASP.NET Core paralela
 - DELETE /templates/:id
 - POST /demandas
 - POST /demandas/from-template/:templateId
+- POST /demandas/buscar-ia
 - GET /demandas/dashboard-kpis
 - GET /demandas
 - GET /demandas/export/excel
@@ -35,13 +37,15 @@ Rotas ja portadas na base ASP.NET Core paralela
 - DELETE /demandas/:id
 - POST /demandas/:id/observacoes
 - PATCH /demandas/:id/observacoes/:observacaoId
-
-Rotas ainda pendentes de port real
-- POST /demandas/buscar-ia
 - POST /demandas/:id/anexos
 - GET /demandas/:id/anexos/:anexoId/download
 
-Ordem recomendada de migracao
-1. Anexos
-2. Busca IA
-3. Troca do deploy do backend para a API C# real
+Status
+- backend principal em C#
+- revisão de mensagens validada localmente
+- busca IA validada localmente
+- anexos validados localmente
+- deploy preparado para Docker/Render
+
+Observação
+- o backend NestJS legado permanece no repositório apenas como referência técnica e fallback controlado.
