@@ -30,67 +30,31 @@ public sealed class MessageReviewService
         }
 
         var canal = NormalizeCanal(request.Canal);
-        var client = _httpClientFactory.CreateClient();
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/chat/completions");
-        httpRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _options.OpenAiApiKey);
-        httpRequest.Content = new StringContent(
-            JsonSerializer.Serialize(new
+        var cleaned = await ExecutePromptAsync(
+            systemInstruction:
+                "Você é um revisor e redator do Grupo Luxus. " +
+                "Sua tarefa é revisar mensagens para clientes, corrigindo gramática, ortografia, concordância, pontuação e clareza sem mudar a intenção principal. " +
+                "Adapte o texto ao canal informado. " +
+                "Para WhatsApp, mantenha um tom humano, cordial, direto e fácil de ler. " +
+                "Para e-mail, mantenha um tom profissional, organizado e claro. " +
+                "Não invente preços, prazos, políticas, promessas, benefícios ou fatos que não estejam no texto do usuário ou no contexto institucional. " +
+                "Use português do Brasil. " +
+                "Retorne apenas JSON válido no formato " +
+                "{\"textoRevisado\":\"...\",\"resumo\":\"...\",\"assuntoSugerido\":\"... ou null\",\"observacoes\":[\"...\"]}. " +
+                "Resumo deve explicar em uma ou duas frases o que foi ajustado. " +
+                "Observacoes deve listar pontos curtos da revisão. " +
+                "Contexto institucional do Grupo Luxus:\n" + _knowledgeContext,
+            payload: new
             {
-                model = "gpt-4o-mini",
-                temperature = 0.2,
-                messages = new object[]
-                {
-                    new
-                    {
-                        role = "system",
-                        content =
-                            "Você é um revisor e redator do Grupo Luxus. " +
-                            "Sua tarefa é revisar mensagens para clientes, corrigindo gramática, ortografia, concordância, pontuação e clareza sem mudar a intenção principal. " +
-                            "Adapte o texto ao canal informado. " +
-                            "Para WhatsApp, mantenha um tom humano, cordial, direto e fácil de ler. " +
-                            "Para e-mail, mantenha um tom profissional, organizado e claro. " +
-                            "Não invente preços, prazos, políticas, promessas, benefícios ou fatos que não estejam no texto do usuário ou no contexto institucional. " +
-                            "Use português do Brasil. " +
-                            "Retorne apenas JSON válido no formato " +
-                            "{\"textoRevisado\":\"...\",\"resumo\":\"...\",\"assuntoSugerido\":\"... ou null\",\"observacoes\":[\"...\"]}. " +
-                            "Resumo deve explicar em uma ou duas frases o que foi ajustado. " +
-                            "Observacoes deve listar pontos curtos da revisão. " +
-                            "Contexto institucional do Grupo Luxus:\n" + _knowledgeContext
-                    },
-                    new
-                    {
-                        role = "user",
-                        content = JsonSerializer.Serialize(new
-                        {
-                            canal,
-                            objetivo = request.Objetivo,
-                            instrucoesAdicionais = request.InstrucoesAdicionais,
-                            manterTomOriginal = request.ManterTomOriginal,
-                            texto = request.Texto.Trim(),
-                        })
-                    }
-                }
-            }),
-            Encoding.UTF8,
-            "application/json");
-
-        using var response = await client.SendAsync(httpRequest, cancellationToken);
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new InvalidOperationException("A IA de revisão não respondeu corretamente no momento.");
-        }
-
-        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
-        var content = document.RootElement
-            .GetProperty("choices")[0]
-            .GetProperty("message")
-            .GetProperty("content")
-            .GetString() ?? "{}";
-
-        var cleaned = content
-            .Replace("```json", string.Empty, StringComparison.OrdinalIgnoreCase)
-            .Replace("```", string.Empty, StringComparison.Ordinal)
-            .Trim();
+                canal,
+                objetivo = request.Objetivo,
+                instrucoesAdicionais = request.InstrucoesAdicionais,
+                manterTomOriginal = request.ManterTomOriginal,
+                texto = request.Texto.Trim(),
+            },
+            temperature: 0.2,
+            errorMessage: "A IA de revisão não respondeu corretamente no momento.",
+            cancellationToken);
 
         try
         {
@@ -138,6 +102,88 @@ public sealed class MessageReviewService
         }
     }
 
+    public async Task<GerarMensagemResponse> GenerateAsync(GerarMensagemRequest request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_options.OpenAiApiKey))
+        {
+            throw new InvalidOperationException("Geração por IA não configurada. Defina OPENAI_API_KEY no servidor.");
+        }
+
+        var canal = NormalizeCanal(request.Canal);
+        var cleaned = await ExecutePromptAsync(
+            systemInstruction:
+                "Você é um redator do Grupo Luxus. " +
+                "Sua tarefa é transformar um briefing bruto em uma mensagem pronta para enviar ao cliente. " +
+                "Adapte a escrita ao canal informado. " +
+                "Para WhatsApp, escreva de forma humana, cordial, objetiva e com leitura fácil. " +
+                "Para e-mail, escreva com estrutura profissional, clara e organizada. " +
+                "Para mensagem geral, escreva de forma clara e profissional. " +
+                "Não invente preços, prazos, políticas, promessas, benefícios ou fatos que não estejam no briefing ou no contexto institucional. " +
+                "Se faltarem dados objetivos, escreva de forma segura e neutra sem criar informação. " +
+                "Use português do Brasil. " +
+                "Retorne apenas JSON válido no formato " +
+                "{\"textoGerado\":\"...\",\"resumo\":\"...\",\"assuntoSugerido\":\"... ou null\",\"observacoes\":[\"...\"]}. " +
+                "Resumo deve explicar em uma ou duas frases o racional do texto gerado. " +
+                "Observacoes deve listar pontos curtos sobre tom, estrutura ou cuidados adotados. " +
+                "Contexto institucional do Grupo Luxus:\n" + _knowledgeContext,
+            payload: new
+            {
+                canal,
+                objetivo = request.Objetivo,
+                tom = request.Tom,
+                instrucoesAdicionais = request.InstrucoesAdicionais,
+                descricaoBruta = request.DescricaoBruta.Trim(),
+            },
+            temperature: 0.35,
+            errorMessage: "A IA de geração não respondeu corretamente no momento.",
+            cancellationToken);
+
+        try
+        {
+            using var parsed = JsonDocument.Parse(cleaned);
+            var root = parsed.RootElement;
+            var textoGerado = root.TryGetProperty("textoGerado", out var textoElement)
+                ? (textoElement.GetString() ?? string.Empty).Trim()
+                : string.Empty;
+            var resumo = root.TryGetProperty("resumo", out var resumoElement)
+                ? (resumoElement.GetString() ?? string.Empty).Trim()
+                : string.Empty;
+            var assuntoSugerido = root.TryGetProperty("assuntoSugerido", out var assuntoElement)
+                ? assuntoElement.GetString()
+                : null;
+            var observacoes = root.TryGetProperty("observacoes", out var observacoesElement) && observacoesElement.ValueKind == JsonValueKind.Array
+                ? observacoesElement.EnumerateArray()
+                    .Select(item => item.GetString()?.Trim())
+                    .Where(item => !string.IsNullOrWhiteSpace(item))
+                    .Cast<string>()
+                    .ToList()
+                : new List<string>();
+
+            if (string.IsNullOrWhiteSpace(textoGerado))
+            {
+                throw new InvalidOperationException("A IA não devolveu uma mensagem válida.");
+            }
+
+            return new GerarMensagemResponse(
+                canal,
+                request.DescricaoBruta.Trim(),
+                textoGerado,
+                string.IsNullOrWhiteSpace(resumo) ? "Mensagem gerada e ajustada para o canal informado." : resumo,
+                string.IsNullOrWhiteSpace(assuntoSugerido) ? null : assuntoSugerido.Trim(),
+                observacoes);
+        }
+        catch (JsonException)
+        {
+            return new GerarMensagemResponse(
+                canal,
+                request.DescricaoBruta.Trim(),
+                cleaned,
+                "Mensagem gerada pela IA.",
+                canal == "email" ? "Sugestão de assunto indisponível" : null,
+                Array.Empty<string>());
+        }
+    }
+
     private static string NormalizeCanal(string? canal)
     {
         var normalized = (canal ?? string.Empty).Trim().ToLowerInvariant();
@@ -180,5 +226,56 @@ public sealed class MessageReviewService
         }
 
         return builder.ToString();
+    }
+
+    private async Task<string> ExecutePromptAsync(
+        string systemInstruction,
+        object payload,
+        double temperature,
+        string errorMessage,
+        CancellationToken cancellationToken)
+    {
+        var client = _httpClientFactory.CreateClient();
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/chat/completions");
+        httpRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _options.OpenAiApiKey);
+        httpRequest.Content = new StringContent(
+            JsonSerializer.Serialize(new
+            {
+                model = "gpt-4o-mini",
+                temperature,
+                messages = new object[]
+                {
+                    new
+                    {
+                        role = "system",
+                        content = systemInstruction
+                    },
+                    new
+                    {
+                        role = "user",
+                        content = JsonSerializer.Serialize(payload)
+                    }
+                }
+            }),
+            Encoding.UTF8,
+            "application/json");
+
+        using var response = await client.SendAsync(httpRequest, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException(errorMessage);
+        }
+
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+        var content = document.RootElement
+            .GetProperty("choices")[0]
+            .GetProperty("message")
+            .GetProperty("content")
+            .GetString() ?? "{}";
+
+        return content
+            .Replace("```json", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Replace("```", string.Empty, StringComparison.Ordinal)
+            .Trim();
     }
 }

@@ -29,4 +29,17 @@ public sealed class AssistenteController : ControllerBase
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new { message = ex.Message });
         }
     }
+
+    [HttpPost("gerar-mensagem")]
+    public async Task<IActionResult> GerarMensagem([FromBody] GerarMensagemRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return Ok(await _messageReviewService.GenerateAsync(request, cancellationToken));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { message = ex.Message });
+        }
+    }
 }
