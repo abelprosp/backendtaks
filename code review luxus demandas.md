@@ -2,17 +2,32 @@
 
 ## Resumo executivo
 
-O backend esta em uma stack correta para continuidade e deploy:
+O projeto ficou estruturado para publicacao com a menor mudanca arriscada possivel:
 
-- NestJS + TypeScript
-- Supabase para banco e storage
-- SQL como fonte de verdade do schema operacional
+- frontend em Next.js + TypeScript
+- backend principal em NestJS + TypeScript
+- host de deploy em ASP.NET Core (C#) para Docker/Fly.io
+- Supabase para banco, storage e SQL operacional
 
-As alteracoes de readiness para producao ficaram coerentes com o objetivo de Railway + Vercel + Supabase.
+A decisao principal foi manter a regra de negocio que ja funciona e colocar uma camada de hospedagem em C#. Isso entrega um backend publicado por entrypoint C# sem uma reescrita total e arriscada da API neste momento.
 
 ## Linguagens usadas e por que
 
-### TypeScript no backend
+### TypeScript no frontend
+
+Usado em:
+
+- `frontend/app/**/*.tsx`
+- `frontend/components/**/*.tsx`
+- `frontend/lib/**/*.ts`
+
+Motivo:
+
+- o projeto usa Next.js e React, que se beneficiam muito de tipagem
+- reduz erros de integracao com a API
+- melhora manutencao de telas, filtros, listagens e formularios
+
+### TypeScript no backend principal
 
 Usado em:
 
@@ -23,6 +38,19 @@ Motivo:
 - NestJS funciona melhor com TypeScript
 - DTOs, guards, services e modules ficam mais seguros
 - reduz erro de contrato e melhora manutencao
+
+### C# no host de deploy
+
+Usado em:
+
+- `backend-csharp/*.cs`
+
+Motivo:
+
+- permite um entrypoint em ASP.NET Core
+- facilita empacotamento em Docker para Fly.io
+- preserva a API atual enquanto evita uma migracao total e arriscada num unico passo
+- centraliza healthcheck e lifecycle do processo publicado no Fly.io
 
 ### SQL no banco
 
@@ -35,17 +63,33 @@ Motivo:
 
 - o projeto depende de estrutura, indices e RPCs que ficam mais naturais em SQL
 - o Supabase/Postgres e o banco real do sistema
+- migrations e RPCs ficam mais controladas e auditaveis
 
-### JSON e JS em configuracao
+### CSS e Tailwind no frontend
+
+Usado em:
+
+- `frontend/app/globals.css`
+- `frontend/tailwind.config.ts`
+
+Motivo:
+
+- agiliza a composicao de interface
+- combina bem com Next.js
+- mantem consistencia visual sem adicionar complexidade desnecessaria
+
+### JSON, TOML e Markdown em configuracao e operacao
 
 Usado em:
 
 - `package.json`
-- `railway.json`
+- `fly.toml`
+- `README.md`
+- `DEPLOY.md`
 
 Motivo:
 
-- sao formatos padrao das ferramentas de build e deploy
+- sao formatos padrao das ferramentas de build, deploy e documentacao
 
 ## Pontos fortes
 
@@ -53,6 +97,7 @@ Motivo:
 - stack coerente
 - deploy cloud agora mais previsivel
 - healthcheck e CORS configuraveis
+- caminho seguro para Fly.io com Docker sem quebrar a API existente
 
 ## Riscos principais
 
@@ -76,16 +121,25 @@ Motivo da escolha atual:
 
 - melhor controle sobre Postgres e Supabase
 
-### Compatibilidade residual com Vercel no backend
+### Regra de negocio ainda nao migrada para C# nativamente
 
 Impacto:
 
-- dois caminhos de deploy podem divergir
+- o backend publicado usa um host C# sobre uma API NestJS
+- isso atende ao deploy, mas nao significa que a logica toda foi portada para .NET
 
 Motivo da escolha atual:
 
-- preservar compatibilidade sem quebrar a aplicacao
+- preservar funcionalidade existente
+- evitar regressao grande numa reescrita completa
 
 ## Conclusao
 
-O backend esta apto para seguir em producao sem reescrita de stack. A escolha por TypeScript no NestJS e SQL no Supabase faz sentido tecnico porque equilibra manutencao, clareza e controle operacional.
+O projeto esta apto para seguir em producao com:
+
+- frontend em Next.js
+- backend funcional preservado em NestJS
+- host C# para Docker/Fly.io
+- Supabase como base de dados e storage
+
+Se a meta futura continuar sendo ter toda a API em ASP.NET Core, o caminho tecnico correto e migrar modulo por modulo. Para colocar no ar agora com estabilidade, a solucao adotada foi a mais segura.

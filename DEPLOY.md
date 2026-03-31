@@ -2,7 +2,7 @@
 
 ## Destino de producao
 
-- Backend: Railway
+- Backend: Fly.io com Docker
 - Banco e storage: Supabase
 - Frontend consumidor: Vercel
 
@@ -12,7 +12,9 @@
 - bind em `0.0.0.0`
 - `GET /health`
 - CORS por `FRONTEND_URL` e `FRONTEND_ORIGIN`
-- `railway.json`
+- host C# em `backend-csharp/`
+- `backend-csharp/Dockerfile`
+- `fly.toml`
 - `start:prod`
 - `.env.example` padronizado
 
@@ -42,18 +44,61 @@ Recomendadas em producao:
 - `FRONTEND_URL`
 - `JWT_REFRESH_SECRET`
 - `SUPABASE_STORAGE_BUCKET`
+- `NODE_BACKEND_PORT`
+- `NODE_BACKEND_PATH`
 
-## Railway
+## Fly.io
 
-1. Criar servico apontando para este repositorio
-2. Definir root directory como `.`
-3. Cadastrar as envs
-4. Fazer deploy
-5. Validar `GET /health`
+1. Instale `flyctl`
+2. Rode `fly auth login`
+3. Edite `fly.toml` e ajuste o nome da app se necessario
+4. Configure os secrets
+5. Rode `fly launch --copy-config --ha=false` se a app ainda nao existir
+6. Rode `fly deploy`
 
 Configuracao declarativa:
 
-- `railway.json`
+- `fly.toml`
+- `backend-csharp/Dockerfile`
+
+### Secrets recomendados
+
+Use `fly secrets set` para definir:
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_ANON_KEY`
+- `DATABASE_URL`
+- `DIRECT_URL`
+- `JWT_SECRET`
+- `JWT_REFRESH_SECRET`
+- `JWT_EXPIRES_IN`
+- `REFRESH_EXPIRES_IN`
+- `FRONTEND_URL`
+- `FRONTEND_ORIGIN`
+- `SUPABASE_STORAGE_BUCKET`
+- `OPENAI_API_KEY` se usar IA
+
+Exemplo:
+
+```bash
+fly secrets set \
+  SUPABASE_URL=... \
+  SUPABASE_SERVICE_ROLE_KEY=... \
+  DATABASE_URL=... \
+  DIRECT_URL=... \
+  JWT_SECRET=... \
+  JWT_REFRESH_SECRET=... \
+  FRONTEND_URL=https://seu-frontend.vercel.app
+```
+
+Variaveis declarativas ja previstas em `fly.toml`:
+
+- `PORT=8080`
+- `NODE_BACKEND_PORT=5000`
+- `NODE_BACKEND_PATH=/app/node-backend`
+
+Normalmente nao e necessario sobrescrever essas tres no Fly.io.
 
 ## Supabase
 
@@ -71,4 +116,6 @@ Projeto existente:
 - [ ] envs configuradas
 - [ ] SQL aplicado no Supabase
 - [ ] backend respondendo em `/health`
+- [ ] host C# subindo a API Node interna sem erro
 - [ ] CORS apontando para a URL final do frontend
+- [ ] `fly deploy` concluido sem erro

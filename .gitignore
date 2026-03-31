@@ -33,3 +33,7 @@ coverage/
 # TypeScript
 *.tsbuildinfo
 .vercel
+
+# .NET / C#
+backend-csharp/bin/
+backend-csharp/obj/
