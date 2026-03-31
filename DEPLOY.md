@@ -2,7 +2,7 @@
 
 ## Destino de producao
 
-- Backend: Fly.io com Docker
+- Backend: Docker em VPS/container generico
 - Banco e storage: Supabase
 - Frontend consumidor: Vercel
 
@@ -13,8 +13,9 @@
 - `GET /health`
 - CORS por `FRONTEND_URL` e `FRONTEND_ORIGIN`
 - host C# em `backend-csharp/`
-- `backend-csharp/Dockerfile`
-- `fly.toml`
+- `Dockerfile` na raiz
+- `docker-compose.vps.yml`
+- `Caddyfile`
 - `start:prod`
 - `.env.example` padronizado
 
@@ -29,12 +30,10 @@ npm run start:dev
 
 ## Variaveis de ambiente
 
-Minimas:
+Minimas para o backend:
 
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `DATABASE_URL`
-- `DIRECT_URL`
 - `JWT_SECRET`
 
 Recomendadas em producao:
@@ -47,58 +46,75 @@ Recomendadas em producao:
 - `NODE_BACKEND_PORT`
 - `NODE_BACKEND_PATH`
 
-## Fly.io
+Somente para o proxy HTTPS do VPS:
 
-1. Instale `flyctl`
-2. Rode `fly auth login`
-3. Edite `fly.toml` e ajuste o nome da app se necessario
-4. Configure os secrets
-5. Rode `fly launch --copy-config --ha=false` se a app ainda nao existir
-6. Rode `fly deploy`
+- `API_DOMAIN`
+- `CADDY_EMAIL`
 
-Configuracao declarativa:
+## Docker local
 
-- `fly.toml`
-- `backend-csharp/Dockerfile`
+Build:
 
-### Secrets recomendados
+```bash
+docker build -t luxus-demandas-api .
+```
 
-Use `fly secrets set` para definir:
+Run:
 
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `SUPABASE_ANON_KEY`
-- `DATABASE_URL`
-- `DIRECT_URL`
-- `JWT_SECRET`
-- `JWT_REFRESH_SECRET`
-- `JWT_EXPIRES_IN`
-- `REFRESH_EXPIRES_IN`
-- `FRONTEND_URL`
-- `FRONTEND_ORIGIN`
-- `SUPABASE_STORAGE_BUCKET`
-- `OPENAI_API_KEY` se usar IA
+```bash
+docker run --rm -p 8080:8080 --env-file .env \
+  -e NODE_ENV=production \
+  -e PORT=8080 \
+  -e NODE_BACKEND_PORT=5000 \
+  -e NODE_BACKEND_PATH=/app/node-backend \
+  luxus-demandas-api
+```
+
+Healthcheck:
+
+```bash
+curl http://localhost:8080/health
+```
+
+## VPS com HTTPS
+
+Arquivos prontos:
+
+- `Dockerfile`
+- `docker-compose.vps.yml`
+- `Caddyfile`
+
+Passos:
+
+1. Crie uma VPS com Docker e Docker Compose
+2. Aponte um dominio ou subdominio para o IP da VPS
+3. Copie o projeto para a VPS
+4. Crie `.env` a partir de `.env.example`
+5. Ajuste `FRONTEND_URL` para a URL da Vercel
+6. Ajuste `API_DOMAIN` para o dominio da API
+7. Rode `docker compose -f docker-compose.vps.yml up -d --build`
 
 Exemplo:
 
 ```bash
-fly secrets set \
-  SUPABASE_URL=... \
-  SUPABASE_SERVICE_ROLE_KEY=... \
-  DATABASE_URL=... \
-  DIRECT_URL=... \
-  JWT_SECRET=... \
-  JWT_REFRESH_SECRET=... \
-  FRONTEND_URL=https://seu-frontend.vercel.app
+cp .env.example .env
+nano .env
+docker compose -f docker-compose.vps.yml up -d --build
 ```
 
-Variaveis declarativas ja previstas em `fly.toml`:
+O `Caddyfile` vai:
 
-- `PORT=8080`
-- `NODE_BACKEND_PORT=5000`
-- `NODE_BACKEND_PATH=/app/node-backend`
+- responder em HTTPS
+- renovar certificado automaticamente
+- fazer proxy para o container `api`
 
-Normalmente nao e necessario sobrescrever essas tres no Fly.io.
+## Provedor recomendado
+
+Para VPS gratis de verdade, o caminho mais consistente tende a ser Oracle Cloud Always Free.
+
+Alternativa mais simples, mas menos estavel para producao:
+
+- um container gratuito em plataforma gerenciada que rode Docker, como Koyeb Free
 
 ## Supabase
 
@@ -115,7 +131,8 @@ Projeto existente:
 
 - [ ] envs configuradas
 - [ ] SQL aplicado no Supabase
+- [ ] dominio apontando para a VPS
 - [ ] backend respondendo em `/health`
 - [ ] host C# subindo a API Node interna sem erro
 - [ ] CORS apontando para a URL final do frontend
-- [ ] `fly deploy` concluido sem erro
+- [ ] containers `api` e `caddy` saudaveis

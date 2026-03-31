@@ -3,7 +3,7 @@
 API do sistema LUXUS DEMANDAS com duas camadas:
 
 - backend principal em NestJS + TypeScript
-- host de deploy em ASP.NET Core (C#) para Docker/Fly.io
+- host de deploy em ASP.NET Core (C#) para Docker/VPS
 
 ## Stack
 
@@ -16,7 +16,7 @@ API do sistema LUXUS DEMANDAS com duas camadas:
 
 ## Arquitetura
 
-- `backend-csharp`: host C# que sobe e proxya a API atual para deploy no Fly.io
+- `backend-csharp`: host C# que sobe e proxya a API atual para deploy em Docker
 - `src/auth`: login, refresh, guards e bootstrap de autenticacao
 - `src/users`: usuarios e perfis
 - `src/setores`: setores
@@ -41,7 +41,7 @@ Healthcheck: `GET /health`
 
 ## Rodando localmente com o host C#
 
-Se voce quiser testar o mesmo entrypoint usado no Fly.io:
+Se voce quiser testar o mesmo entrypoint usado no container:
 
 ```bash
 cp .env.example .env
@@ -59,12 +59,12 @@ Nesse modo:
 - a API NestJS sobe internamente em `http://127.0.0.1:5000`
 - `GET /health` valida as duas camadas
 
-## Deploy no Fly.io via C#
+## Deploy em Docker via C#
 
-O caminho recomendado para Fly.io agora e:
+O caminho recomendado agora e:
 
-- usar `backend-csharp/Dockerfile`
-- usar `fly.toml`
+- usar `Dockerfile` na raiz do backend
+- usar `docker-compose.vps.yml` quando houver VPS com HTTPS
 - subir o host ASP.NET Core
 - deixar esse host iniciar internamente a API atual em Node
 
@@ -97,14 +97,16 @@ Principais:
 - `JWT_SECRET`
 - `JWT_REFRESH_SECRET`
 - `SUPABASE_STORAGE_BUCKET`
-- `NODE_BACKEND_PORT` (host C# / Fly.io)
-- `NODE_BACKEND_PATH` (host C# / Fly.io)
+- `NODE_BACKEND_PORT` (host C# / Docker)
+- `NODE_BACKEND_PATH` (host C# / Docker)
+- `API_DOMAIN` (HTTPS via Caddy no VPS)
+- `CADDY_EMAIL` (HTTPS via Caddy no VPS)
 
 ## Deploy
 
 Fluxo recomendado:
 
-- backend em Docker no Fly.io
+- backend em Docker em VPS/container
 - frontend na Vercel
 - banco e storage no Supabase
 
@@ -114,7 +116,7 @@ Guia detalhado em `DEPLOY.md`.
 
 O projeto nao teve a regra de negocio reescrita para C# de uma vez. Para manter compatibilidade e reduzir risco, o que foi preparado e:
 
-- host de deploy em C# para Docker/Fly.io
+- host de deploy em C# para Docker/VPS
 - backend funcional existente preservado em NestJS + TypeScript
 
 Isso permite publicar agora sem quebrar a API atual e deixa aberta uma migracao gradual para ASP.NET Core no futuro, se essa decisao for mantida.

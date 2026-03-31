@@ -1,6 +1,6 @@
 # backend-csharp
 
-Host em ASP.NET Core para deploy no Fly.io.
+Host em ASP.NET Core para deploy em Docker.
 
 Objetivo:
 
@@ -12,7 +12,7 @@ Isso evita uma reescrita arriscada de toda a regra de negocio de uma vez.
 
 ## Variaveis
 
-- `PORT`: porta publica do Fly.io
+- `PORT`: porta publica do container
 - `NODE_BACKEND_PORT`: porta interna do backend Node
 - `NODE_BACKEND_PATH`: caminho interno do backend Node no container
 

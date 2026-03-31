@@ -32,7 +32,7 @@ Arquivos atuais:
 
 1. aplique SQL no Supabase antes do deploy da aplicação
 2. valide as mudanças em staging ou em um projeto de homologação
-3. publique o backend no Fly.io
+3. publique o backend no container/VPS
 4. publique o frontend na Vercel
 
 ## Observações
