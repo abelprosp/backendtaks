@@ -37,3 +37,5 @@ coverage/
 # .NET / C#
 backend-csharp/bin/
 backend-csharp/obj/
+backend-csharp-api/bin/
+backend-csharp-api/obj/
