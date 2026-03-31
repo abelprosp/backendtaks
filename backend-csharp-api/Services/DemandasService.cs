@@ -473,8 +473,8 @@ public sealed class DemandasService
         var requestScope = NormalizeIaScope(scope);
         var searchMode = ParsePesquisaGeralMode(query, requestScope);
         var referenceData = await LoadIaReferenceDataAsync(cancellationToken);
-        var aiFilters = await TryExtractFiltersWithOpenAiAsync(query, referenceData, cancellationToken);
-        var filters = BuildIaFilters(query, aiFilters, referenceData, requestScope);
+        var aiExtraction = await TryExtractFiltersWithOpenAiAsync(query, referenceData, cancellationToken);
+        var filters = BuildIaFilters(query, aiExtraction.Filters, referenceData, requestScope);
         ApplyIaContextToFilters(query, filters, context);
 
         var shouldSearchDemandas = requestScope is "all" or "demandas" or "observacoes_gerais" or "status";
@@ -512,7 +512,14 @@ public sealed class DemandasService
             }
         }
 
-        var message = BuildIaSummary(query, requestScope, previewTotal, protocolos, globalEvidence.Matches);
+        var message = BuildIaSummary(
+            query,
+            requestScope,
+            previewTotal,
+            protocolos,
+            globalEvidence.Matches,
+            aiExtraction.UsedAi,
+            aiExtraction.ResponseText);
         var topMatches = previewData.Take(5).Select(item => new
         {
             demandaId = item.GetProperty("id").GetString() ?? string.Empty,
@@ -526,6 +533,13 @@ public sealed class DemandasService
         {
             filters,
             message,
+            ai = new
+            {
+                online = true,
+                used = aiExtraction.UsedAi,
+                mode = aiExtraction.Mode,
+                engine = aiExtraction.Engine,
+            },
             links,
             preview = new
             {
@@ -634,7 +648,7 @@ public sealed class DemandasService
             usersTask.Result.Select(row => new NamedEntity(row.GetStringOrEmpty("id"), row.GetStringOrEmpty("name"))).ToList());
     }
 
-    private async Task<Dictionary<string, object?>> TryExtractFiltersWithOpenAiAsync(
+    private async Task<IaFilterExtractionResult> TryExtractFiltersWithOpenAiAsync(
         string query,
         IaReferenceData referenceData,
         CancellationToken cancellationToken)
@@ -656,9 +670,10 @@ public sealed class DemandasService
                             role = "system",
                             content =
                                 "Você converte pedidos em português para filtros de demandas. " +
-                                "Retorne apenas JSON válido no formato {\"filters\": {...}}. " +
+                                "Retorne apenas JSON válido no formato {\"filters\": {...}, \"responseText\": \"...\"}. " +
                                 "Não invente IDs. Use somente IDs das listas enviadas. " +
-                                "Campos válidos: clienteId, assunto, status, tipoRecorrencia, protocolo, prioridade, criadorId, responsavelPrincipalId, setorIds, condicaoPrazo, pesquisarTarefaOuObservacao, pesquisaGeral, dataCriacaoDe, dataCriacaoAte, prazoDe, prazoAte."
+                                "Campos válidos: clienteId, assunto, status, tipoRecorrencia, protocolo, prioridade, criadorId, responsavelPrincipalId, setorIds, condicaoPrazo, pesquisarTarefaOuObservacao, pesquisaGeral, dataCriacaoDe, dataCriacaoAte, prazoDe, prazoAte. " +
+                                "responseText deve ser uma resposta curta, em português do Brasil, explicando o que você entendeu da busca e o que será aberto no sistema."
                         },
                         new
                         {
@@ -679,7 +694,12 @@ public sealed class DemandasService
             using var response = await client.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                return new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                return new IaFilterExtractionResult(
+                    new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase),
+                    false,
+                    "fallback",
+                    null,
+                    null);
             }
 
             using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
@@ -700,7 +720,12 @@ public sealed class DemandasService
                 : root;
             if (filters.ValueKind != JsonValueKind.Object)
             {
-                return new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                return new IaFilterExtractionResult(
+                    new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase),
+                    false,
+                    "fallback",
+                    null,
+                    null);
             }
 
             var result = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
@@ -716,11 +741,25 @@ public sealed class DemandasService
                 };
             }
 
-            return result;
+            var responseText = root.TryGetProperty("responseText", out var responseElement)
+                ? responseElement.GetString()?.Trim()
+                : null;
+
+            return new IaFilterExtractionResult(
+                result,
+                true,
+                "openai",
+                string.IsNullOrWhiteSpace(responseText) ? null : responseText,
+                "gpt-4o-mini");
         }
         catch
         {
-            return new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            return new IaFilterExtractionResult(
+                new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase),
+                false,
+                "fallback",
+                null,
+                null);
         }
     }
 
@@ -875,23 +914,45 @@ public sealed class DemandasService
         string scope,
         int previewTotal,
         IReadOnlyList<string> protocolos,
-        IReadOnlyList<GlobalIaMatch> globalMatches)
+        IReadOnlyList<GlobalIaMatch> globalMatches,
+        bool usedAi,
+        string? aiResponseText)
     {
         _ = query;
+        if (!string.IsNullOrWhiteSpace(aiResponseText))
+        {
+            var summarySuffix = previewTotal > 0
+                ? protocolos.Count > 0
+                    ? $" Encontrei {previewTotal} demanda(s). Exemplos: {string.Join(", ", protocolos)}."
+                    : $" Encontrei {previewTotal} demanda(s)."
+                : globalMatches.Count > 0
+                    ? " Não encontrei demandas com esse recorte, mas localizei itens relacionados em outros módulos."
+                    : " Não encontrei resultados com esse recorte.";
+            return $"{aiResponseText.Trim()} {summarySuffix}".Trim();
+        }
+
         if (previewTotal > 0)
         {
             var protocolosText = protocolos.Count > 0 ? $" Exemplos: {string.Join(", ", protocolos)}." : string.Empty;
-            return $"Encontrei {previewTotal} demanda(s) para essa busca.{protocolosText}";
+            return usedAi
+                ? $"Interpretei sua busca com IA e encontrei {previewTotal} demanda(s).{protocolosText}"
+                : $"Apliquei uma leitura automática da busca e encontrei {previewTotal} demanda(s).{protocolosText}";
         }
 
         if (globalMatches.Count > 0)
         {
-            return scope == "all"
-                ? "Não encontrei resultados em demandas, mas há correspondências em outros módulos do sistema."
-                : "Não encontrei demandas para esse filtro, mas a busca localizou itens em outro módulo relacionado.";
+            return usedAi
+                ? scope == "all"
+                    ? "Interpretei sua busca com IA. Não encontrei resultados em demandas, mas há correspondências em outros módulos do sistema."
+                    : "Interpretei sua busca com IA. Não encontrei demandas para esse filtro, mas localizei itens em outro módulo relacionado."
+                : scope == "all"
+                    ? "Não encontrei resultados em demandas, mas há correspondências em outros módulos do sistema."
+                    : "Não encontrei demandas para esse filtro, mas a busca localizou itens em outro módulo relacionado.";
         }
 
-        return "Não encontrei resultados para essa busca.";
+        return usedAi
+            ? "Interpretei sua busca com IA, mas não encontrei resultados para esse recorte."
+            : "Não encontrei resultados para essa busca.";
     }
 
     private static List<object> BuildTopMatchFields(JsonElement item, ListDemandasFiltersQuery filters)
@@ -2041,6 +2102,13 @@ public sealed class DemandasService
         IReadOnlyList<NamedEntity> Setores,
         IReadOnlyList<NamedEntity> Clientes,
         IReadOnlyList<NamedEntity> Users);
+
+    private sealed record IaFilterExtractionResult(
+        Dictionary<string, object?> Filters,
+        bool UsedAi,
+        string Mode,
+        string? ResponseText,
+        string? Engine);
 
     private sealed record GlobalIaMatch(
         string Module,
