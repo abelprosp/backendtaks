@@ -1,0 +1,47 @@
+ROTAS ATUAIS DO BACKEND NODE AINDA NAO PORTADAS PARA C#
+
+Rotas ja portadas na base ASP.NET Core paralela
+- GET /health
+- POST /auth/login
+- POST /auth/refresh
+- POST /auth/me
+- GET /auth/bootstrap
+- GET /users/dropdown
+- GET /users/roles
+- GET /users
+- POST /users
+- PUT /users/:id
+- DELETE /users/:id
+- GET /setores
+- POST /setores
+- PUT /setores/:id
+- DELETE /setores/:id
+- GET /clientes
+- POST /clientes
+- PUT /clientes/:id
+- DELETE /clientes/:id
+- POST /templates
+- GET /templates
+- GET /templates/:id
+- PUT /templates/:id
+- DELETE /templates/:id
+- POST /demandas
+- POST /demandas/from-template/:templateId
+- GET /demandas/dashboard-kpis
+- GET /demandas
+- GET /demandas/export/excel
+- GET /demandas/:id
+- PUT /demandas/:id
+- DELETE /demandas/:id
+- POST /demandas/:id/observacoes
+- PATCH /demandas/:id/observacoes/:observacaoId
+
+Rotas ainda pendentes de port real
+- POST /demandas/buscar-ia
+- POST /demandas/:id/anexos
+- GET /demandas/:id/anexos/:anexoId/download
+
+Ordem recomendada de migracao
+1. Anexos
+2. Busca IA
+3. Troca do deploy do backend para a API C# real

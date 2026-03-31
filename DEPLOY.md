@@ -12,19 +12,18 @@
 - bind em `0.0.0.0`
 - `GET /health`
 - CORS por `FRONTEND_URL` e `FRONTEND_ORIGIN`
-- host C# em `backend-csharp/`
+- API principal em `backend-csharp-api/`
 - `Dockerfile` na raiz
 - `render.yaml`
-- `start:prod`
 - `.env.example` padronizado
 
 ## Rodando localmente
 
 ```bash
 cp .env.example .env
-npm install
-npm run build
-npm run start:dev
+export PATH=/home/abel/.dotnet:$PATH
+dotnet build backend-csharp-api/LuxusDemandas.Api.csproj
+ASPNETCORE_URLS=http://127.0.0.1:4000 dotnet run --project backend-csharp-api/LuxusDemandas.Api.csproj --no-build
 ```
 
 ## Variaveis de ambiente
@@ -40,10 +39,11 @@ Recomendadas em producao:
 - `NODE_ENV=production`
 - `PORT`
 - `FRONTEND_URL`
+- `FRONTEND_ORIGIN`
+- `SUPABASE_ANON_KEY`
 - `JWT_REFRESH_SECRET`
 - `SUPABASE_STORAGE_BUCKET`
-- `NODE_BACKEND_PORT`
-- `NODE_BACKEND_PATH`
+- `OPENAI_API_KEY` se usar IA
 
 ## Render Free
 
@@ -69,8 +69,6 @@ Secrets que o Render vai pedir:
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `SUPABASE_ANON_KEY`
-- `DATABASE_URL`
-- `DIRECT_URL`
 - `OPENAI_API_KEY` se usar IA
 
 Observacoes:
@@ -78,6 +76,7 @@ Observacoes:
 - o `render.yaml` gera `JWT_SECRET` e `JWT_REFRESH_SECRET`
 - o plano configurado e `free`
 - o healthcheck configurado e `/health`
+- `DATABASE_URL` e `DIRECT_URL` ficam opcionais, apenas para usos legados com Prisma/scripts
 
 ## Limitacoes do plano gratis
 
@@ -101,18 +100,16 @@ docker build -t luxus-demandas-api .
 Run:
 
 ```bash
-docker run --rm -p 8080:8080 --env-file .env \
+docker run --rm -p 10000:10000 --env-file .env \
   -e NODE_ENV=production \
-  -e PORT=8080 \
-  -e NODE_BACKEND_PORT=5000 \
-  -e NODE_BACKEND_PATH=/app/node-backend \
+  -e PORT=10000 \
   luxus-demandas-api
 ```
 
 Healthcheck:
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:10000/health
 ```
 
 ## Alternativa futura
@@ -138,6 +135,6 @@ Projeto existente:
 - [ ] envs configuradas
 - [ ] SQL aplicado no Supabase
 - [ ] backend respondendo em `/health`
-- [ ] host C# subindo a API Node interna sem erro
+- [ ] API C# subindo sem erro
 - [ ] CORS apontando para a URL final do frontend
 - [ ] deploy do Render concluido sem erro

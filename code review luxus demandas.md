@@ -1,145 +1,64 @@
 # Code Review LUXUS DEMANDAS
 
-## Resumo executivo
+## Estado atual
 
-O projeto ficou estruturado para publicacao com a menor mudanca arriscada possivel:
+- Frontend principal em Next.js + TypeScript, fora deste repositório, publicado na Vercel.
+- Backend principal em ASP.NET Core 8 + C# em `backend-csharp-api/`.
+- Banco e storage em Supabase.
+- Backend NestJS antigo mantido em `src/` apenas como legado técnico e referência de migração.
 
-- frontend em Next.js + TypeScript
-- backend principal em NestJS + TypeScript
-- host de deploy em ASP.NET Core (C#) para Docker/Render
-- Supabase para banco, storage e SQL operacional
+## Alocação por parte
 
-A decisao principal foi manter a regra de negocio que ja funciona e colocar uma camada de hospedagem em C#. Isso entrega um backend publicado por entrypoint C# sem uma reescrita total e arriscada da API neste momento.
+- `backend-csharp-api/`
+  API principal em C#.
+  Controllers, services, models, auth JWT, healthcheck, busca IA e anexos.
 
-## Linguagens usadas e por que
+- `Dockerfile`
+  Container principal do backend.
+  Agora publica diretamente a API `backend-csharp-api`.
 
-### TypeScript no frontend
-
-Usado em:
-
-- `frontend/app/**/*.tsx`
-- `frontend/components/**/*.tsx`
-- `frontend/lib/**/*.ts`
-
-Motivo:
-
-- o projeto usa Next.js e React, que se beneficiam muito de tipagem
-- reduz erros de integracao com a API
-- melhora manutencao de telas, filtros, listagens e formularios
-
-### TypeScript no backend principal
-
-Usado em:
-
-- `src/**/*.ts`
-
-Motivo:
-
-- NestJS funciona melhor com TypeScript
-- DTOs, guards, services e modules ficam mais seguros
-- reduz erro de contrato e melhora manutencao
-
-### C# no host de deploy
-
-Usado em:
-
-- `backend-csharp/*.cs`
-
-Motivo:
-
-- permite um entrypoint em ASP.NET Core
-- facilita empacotamento em Docker para container gerenciado
-- preserva a API atual enquanto evita uma migracao total e arriscada num unico passo
-- centraliza healthcheck e lifecycle do processo publicado
-
-### SQL no banco
-
-Usado em:
-
-- `supabase/schema.sql`
-- `supabase/migrations/*.sql`
-
-Motivo:
-
-- o projeto depende de estrutura, indices e RPCs que ficam mais naturais em SQL
-- o Supabase/Postgres e o banco real do sistema
-- migrations e RPCs ficam mais controladas e auditaveis
-
-### CSS e Tailwind no frontend
-
-Usado em:
-
-- `frontend/app/globals.css`
-- `frontend/tailwind.config.ts`
-
-Motivo:
-
-- agiliza a composicao de interface
-- combina bem com Next.js
-- mantem consistencia visual sem adicionar complexidade desnecessaria
-
-### JSON, YAML e Markdown em configuracao e operacao
-
-Usado em:
-
-- `package.json`
 - `render.yaml`
-- `README.md`
-- `DEPLOY.md`
+  Declaração do serviço no Render.
+  Mantém `PORT`, `/health`, envs do Supabase e CORS por `FRONTEND_URL` e `FRONTEND_ORIGIN`.
 
-Motivo:
+- `supabase/`
+  SQL, schema base, seed e migrations.
 
-- sao formatos padrao das ferramentas de build, deploy e documentacao
+- `src/`
+  Backend NestJS legado.
+  Não é mais o alvo principal do deploy.
+
+## Linguagens usadas e por quê
+
+- C#
+  Usado em `backend-csharp-api/**/*.cs`.
+  Foi escolhido para consolidar o backend principal em ASP.NET Core com tipagem forte, autenticação nativa e deploy limpo em container.
+
+- TypeScript
+  Ainda existe em `src/**/*.ts` como backend legado e no frontend fora deste repositório.
+  Foi mantido para referência técnica e rollback controlado, sem apagar a implementação anterior.
+
+- SQL
+  Usado em `supabase/schema.sql` e `supabase/migrations/*.sql`.
+  Continua sendo a forma mais controlada para schema, índices, enums e RPCs no Supabase/Postgres.
+
+- Dockerfile/YAML/Markdown
+  Usados para containerização, deploy e documentação.
 
 ## Pontos fortes
 
-- arquitetura modular
-- stack coerente
-- deploy cloud agora mais previsivel
-- healthcheck e CORS configuraveis
-- caminho seguro para container gratuito sem quebrar a API existente
+- API C# cobre o conjunto principal de rotas do sistema.
+- `/health` está padronizado.
+- Upload e download de anexos foram validados localmente na API C#.
+- Busca por IA foi validada localmente com normalização de filtros mais restrita.
+- O deploy ficou mais simples porque o container sobe direto a API C#.
 
-## Riscos principais
+## Pontos de atenção
 
-### Sessao no frontend em `localStorage`
+- O Render Free continua sujeito a sleep.
+- O backend legado continua no repositório e exige disciplina para não confundir a origem do deploy.
+- Segredos expostos durante testes precisam ser rotacionados.
 
-Impacto:
+## Conclusão
 
-- maior exposicao se houver XSS
-
-Motivo da escolha atual:
-
-- simplicidade de implementacao e compatibilidade com a base existente
-
-### Fonte de verdade do banco em SQL manual
-
-Impacto:
-
-- exige disciplina operacional maior nas migrations
-
-Motivo da escolha atual:
-
-- melhor controle sobre Postgres e Supabase
-
-### Regra de negocio ainda nao migrada para C# nativamente
-
-Impacto:
-
-- o backend publicado usa um host C# sobre uma API NestJS
-- isso atende ao deploy, mas nao significa que a logica toda foi portada para .NET
-
-Motivo da escolha atual:
-
-- preservar funcionalidade existente
-- evitar regressao grande numa reescrita completa
-
-## Conclusao
-
-O projeto esta apto para seguir em producao com:
-
-- frontend em Next.js
-- backend funcional preservado em NestJS
-- host C# para Docker/Render
-- Supabase como base de dados e storage
-
-Se a meta futura continuar sendo ter toda a API em ASP.NET Core, o caminho tecnico correto e migrar modulo por modulo. Para colocar no ar agora com estabilidade, a solucao adotada foi a mais segura.
+O backend principal deste repositório agora está alocado em `backend-csharp-api/` e em C#. O NestJS foi preservado apenas como legado técnico. O próximo passo operacional é publicar esse estado no GitHub e forçar um novo deploy do Render para que a produção passe a usar a API ASP.NET Core como origem real.

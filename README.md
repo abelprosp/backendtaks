@@ -1,63 +1,39 @@
 # LUXUS DEMANDAS Backend
 
-API do sistema LUXUS DEMANDAS com duas camadas:
-
-- backend principal em NestJS + TypeScript
-- host de deploy em ASP.NET Core (C#) para Docker/Render
+API do sistema LUXUS DEMANDAS com backend principal em ASP.NET Core (C#).
 
 ## Stack
 
-- NestJS 10
-- TypeScript
 - ASP.NET Core 8
+- C#
 - Supabase
-- Prisma schema/client auxiliar
 - JWT para autenticacao
+- OpenAI opcional para busca IA
+- NestJS/TypeScript legado preservado no repositório como referencia técnica
 
 ## Arquitetura
 
-- `backend-csharp`: host C# que sobe e proxya a API atual para deploy em Docker
-- `src/auth`: login, refresh, guards e bootstrap de autenticacao
-- `src/users`: usuarios e perfis
-- `src/setores`: setores
-- `src/clientes`: clientes
-- `src/demandas`: regras principais de negocio, anexos, observacoes, dashboard e busca IA
-- `src/templates`: templates de demandas
+- `backend-csharp-api/`: API principal em ASP.NET Core 8
+- `backend-csharp-api/Controllers`: rotas HTTP da API C#
+- `backend-csharp-api/Services`: regra de negocio migrada
+- `backend-csharp-api/Models`: contratos HTTP
+- `backend-csharp-api/Security`: auth JWT e claims
 - `src/health`: healthcheck
 - `supabase/`: schema SQL, seed e migrations
+- `src/`: backend NestJS legado mantido apenas para referencia e fallback tecnico
 
 ## Rodando localmente
 
 ```bash
 cp .env.example .env
-npm install
-npm run build
-npm run start:dev
+export PATH=/home/abel/.dotnet:$PATH
+dotnet build backend-csharp-api/LuxusDemandas.Api.csproj
+ASPNETCORE_URLS=http://127.0.0.1:4000 dotnet run --project backend-csharp-api/LuxusDemandas.Api.csproj --no-build
 ```
 
 API local padrao: `http://localhost:4000`
 
 Healthcheck: `GET /health`
-
-## Rodando localmente com o host C#
-
-Se voce quiser testar o mesmo entrypoint usado no container:
-
-```bash
-cp .env.example .env
-npm install
-npm run build
-
-dotnet publish backend-csharp/LuxusDemandas.Host.csproj -c Release -o /tmp/luxus-csharp-host
-PORT=8080 NODE_BACKEND_PORT=5000 NODE_BACKEND_PATH=$(pwd) \
-  dotnet /tmp/luxus-csharp-host/LuxusDemandas.Host.dll
-```
-
-Nesse modo:
-
-- o host ASP.NET Core responde em `http://localhost:8080`
-- a API NestJS sobe internamente em `http://127.0.0.1:5000`
-- `GET /health` valida as duas camadas
 
 ## Deploy em container gratis
 
@@ -65,20 +41,9 @@ O caminho recomendado agora e:
 
 - usar `Dockerfile` na raiz do backend
 - usar `render.yaml` para criar um Web Service no Render
-- subir o host ASP.NET Core
-- deixar esse host iniciar internamente a API atual em Node
+- publicar diretamente a API `backend-csharp-api`
 
-Isso preserva as funcionalidades existentes sem reescrever a regra de negocio inteira de uma vez.
-
-## Scripts
-
-- `npm run build`
-- `npm run start`
-- `npm run start:dev`
-- `npm run start:prod`
-- `npm run prisma:generate`
-- `npm run prisma:migrate`
-- `npm run prisma:studio`
+O backend NestJS antigo permanece no repositório, mas nao e mais o alvo principal do container.
 
 ## Variaveis de ambiente
 
@@ -91,14 +56,19 @@ Principais:
 - `FRONTEND_URL`
 - `FRONTEND_ORIGIN`
 - `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `DATABASE_URL`
-- `DIRECT_URL`
 - `JWT_SECRET`
 - `JWT_REFRESH_SECRET`
+- `JWT_EXPIRES_IN`
+- `REFRESH_EXPIRES_IN`
 - `SUPABASE_STORAGE_BUCKET`
-- `NODE_BACKEND_PORT` (host C# / Docker)
-- `NODE_BACKEND_PATH` (host C# / Docker)
+- `OPENAI_API_KEY` (opcional)
+
+Opcional/legado:
+
+- `DATABASE_URL`
+- `DIRECT_URL`
 
 ## Deploy
 
@@ -110,11 +80,8 @@ Fluxo recomendado:
 
 Guia detalhado em `DEPLOY.md`.
 
-## Observacao importante sobre C#
+## Estado atual da migracao
 
-O projeto nao teve a regra de negocio reescrita para C# de uma vez. Para manter compatibilidade e reduzir risco, o que foi preparado e:
-
-- host de deploy em C# para Docker/Render
-- backend funcional existente preservado em NestJS + TypeScript
-
-Isso permite publicar agora sem quebrar a API atual e deixa aberta uma migracao gradual para ASP.NET Core no futuro, se essa decisao for mantida.
+- a API C# em `backend-csharp-api/` cobre auth, users, setores, clientes, templates, demandas, observacoes, anexos, dashboard e busca por IA
+- o Dockerfile da raiz foi ajustado para publicar a API C# como backend principal
+- o backend NestJS legado continua versionado apenas para consulta tecnica e rollback controlado

@@ -1,0 +1,3 @@
+﻿<Project>
+  <Import Project="../build/LuxusDemandas.Api.props" />
+</Project>
