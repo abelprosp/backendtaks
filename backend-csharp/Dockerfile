@@ -3,6 +3,9 @@
 FROM node:20-bookworm-slim AS node-build
 WORKDIR /src/node-backend
 
+ENV DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
+ENV DIRECT_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres
+
 COPY package*.json ./
 COPY nest-cli.json ./
 COPY tsconfig*.json ./

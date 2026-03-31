@@ -2,7 +2,7 @@
 
 ## Destino de producao
 
-- Backend: Docker em VPS/container generico
+- Backend: container gratuito no Render
 - Banco e storage: Supabase
 - Frontend consumidor: Vercel
 
@@ -14,8 +14,7 @@
 - CORS por `FRONTEND_URL` e `FRONTEND_ORIGIN`
 - host C# em `backend-csharp/`
 - `Dockerfile` na raiz
-- `docker-compose.vps.yml`
-- `Caddyfile`
+- `render.yaml`
 - `start:prod`
 - `.env.example` padronizado
 
@@ -46,10 +45,50 @@ Recomendadas em producao:
 - `NODE_BACKEND_PORT`
 - `NODE_BACKEND_PATH`
 
-Somente para o proxy HTTPS do VPS:
+## Render Free
 
-- `API_DOMAIN`
-- `CADDY_EMAIL`
+Arquivos prontos:
+
+- `Dockerfile`
+- `render.yaml`
+
+Passos:
+
+1. Crie uma conta no Render
+2. Clique em `New +` > `Blueprint`
+3. Conecte o repositório `abelprosp/backendtaks`
+4. Selecione a branch `codex/prepare-production-deploy`
+5. Deixe o Render ler `render.yaml`
+6. Preencha os secrets pedidos no dashboard
+7. Crie o serviço
+
+Secrets que o Render vai pedir:
+
+- `FRONTEND_URL`
+- `FRONTEND_ORIGIN`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_ANON_KEY`
+- `DATABASE_URL`
+- `DIRECT_URL`
+- `OPENAI_API_KEY` se usar IA
+
+Observacoes:
+
+- o `render.yaml` gera `JWT_SECRET` e `JWT_REFRESH_SECRET`
+- o plano configurado e `free`
+- o healthcheck configurado e `/health`
+
+## Limitacoes do plano gratis
+
+O proprio Render informa que:
+
+- o web service gratuito pode entrar em sleep apos 15 minutos sem trafego
+- a volta pode levar cerca de 1 minuto
+- o filesystem e efemero
+- nao recomendam free web service para producao critica
+
+Essas limitacoes nao impedem teste e uso leve, e o projeto ja usa Supabase para persistencia principal.
 
 ## Docker local
 
@@ -76,45 +115,12 @@ Healthcheck:
 curl http://localhost:8080/health
 ```
 
-## VPS com HTTPS
+## Alternativa futura
 
-Arquivos prontos:
+Se depois voce quiser sair do free container e ir para algo mais estavel:
 
-- `Dockerfile`
-- `docker-compose.vps.yml`
-- `Caddyfile`
-
-Passos:
-
-1. Crie uma VPS com Docker e Docker Compose
-2. Aponte um dominio ou subdominio para o IP da VPS
-3. Copie o projeto para a VPS
-4. Crie `.env` a partir de `.env.example`
-5. Ajuste `FRONTEND_URL` para a URL da Vercel
-6. Ajuste `API_DOMAIN` para o dominio da API
-7. Rode `docker compose -f docker-compose.vps.yml up -d --build`
-
-Exemplo:
-
-```bash
-cp .env.example .env
-nano .env
-docker compose -f docker-compose.vps.yml up -d --build
-```
-
-O `Caddyfile` vai:
-
-- responder em HTTPS
-- renovar certificado automaticamente
-- fazer proxy para o container `api`
-
-## Provedor recomendado
-
-Para VPS gratis de verdade, o caminho mais consistente tende a ser Oracle Cloud Always Free.
-
-Alternativa mais simples, mas menos estavel para producao:
-
-- um container gratuito em plataforma gerenciada que rode Docker, como Koyeb Free
+- usar uma VPS propria com `docker-compose.vps.yml`
+- ou migrar para um container pago/sem sleep
 
 ## Supabase
 
@@ -131,8 +137,7 @@ Projeto existente:
 
 - [ ] envs configuradas
 - [ ] SQL aplicado no Supabase
-- [ ] dominio apontando para a VPS
 - [ ] backend respondendo em `/health`
 - [ ] host C# subindo a API Node interna sem erro
 - [ ] CORS apontando para a URL final do frontend
-- [ ] containers `api` e `caddy` saudaveis
+- [ ] deploy do Render concluido sem erro

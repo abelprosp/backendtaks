@@ -17,3 +17,5 @@ Isso evita uma reescrita arriscada de toda a regra de negocio de uma vez.
 - `NODE_BACKEND_PATH`: caminho interno do backend Node no container
 
 As demais variaveis de banco, JWT, Supabase e OpenAI continuam as mesmas do backend atual.
+
+O destino mais simples hoje e um container no Render usando o `Dockerfile` da raiz do backend.

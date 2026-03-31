@@ -3,7 +3,7 @@
 API do sistema LUXUS DEMANDAS com duas camadas:
 
 - backend principal em NestJS + TypeScript
-- host de deploy em ASP.NET Core (C#) para Docker/VPS
+- host de deploy em ASP.NET Core (C#) para Docker/Render
 
 ## Stack
 
@@ -59,12 +59,12 @@ Nesse modo:
 - a API NestJS sobe internamente em `http://127.0.0.1:5000`
 - `GET /health` valida as duas camadas
 
-## Deploy em Docker via C#
+## Deploy em container gratis
 
 O caminho recomendado agora e:
 
 - usar `Dockerfile` na raiz do backend
-- usar `docker-compose.vps.yml` quando houver VPS com HTTPS
+- usar `render.yaml` para criar um Web Service no Render
 - subir o host ASP.NET Core
 - deixar esse host iniciar internamente a API atual em Node
 
@@ -99,14 +99,12 @@ Principais:
 - `SUPABASE_STORAGE_BUCKET`
 - `NODE_BACKEND_PORT` (host C# / Docker)
 - `NODE_BACKEND_PATH` (host C# / Docker)
-- `API_DOMAIN` (HTTPS via Caddy no VPS)
-- `CADDY_EMAIL` (HTTPS via Caddy no VPS)
 
 ## Deploy
 
 Fluxo recomendado:
 
-- backend em Docker em VPS/container
+- backend em container gratuito no Render
 - frontend na Vercel
 - banco e storage no Supabase
 
@@ -116,7 +114,7 @@ Guia detalhado em `DEPLOY.md`.
 
 O projeto nao teve a regra de negocio reescrita para C# de uma vez. Para manter compatibilidade e reduzir risco, o que foi preparado e:
 
-- host de deploy em C# para Docker/VPS
+- host de deploy em C# para Docker/Render
 - backend funcional existente preservado em NestJS + TypeScript
 
 Isso permite publicar agora sem quebrar a API atual e deixa aberta uma migracao gradual para ASP.NET Core no futuro, se essa decisao for mantida.

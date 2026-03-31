@@ -6,7 +6,7 @@ O projeto ficou estruturado para publicacao com a menor mudanca arriscada possiv
 
 - frontend em Next.js + TypeScript
 - backend principal em NestJS + TypeScript
-- host de deploy em ASP.NET Core (C#) para Docker/VPS
+- host de deploy em ASP.NET Core (C#) para Docker/Render
 - Supabase para banco, storage e SQL operacional
 
 A decisao principal foi manter a regra de negocio que ja funciona e colocar uma camada de hospedagem em C#. Isso entrega um backend publicado por entrypoint C# sem uma reescrita total e arriscada da API neste momento.
@@ -48,7 +48,7 @@ Usado em:
 Motivo:
 
 - permite um entrypoint em ASP.NET Core
-- facilita empacotamento em Docker para VPS ou container gerenciado
+- facilita empacotamento em Docker para container gerenciado
 - preserva a API atual enquanto evita uma migracao total e arriscada num unico passo
 - centraliza healthcheck e lifecycle do processo publicado
 
@@ -83,7 +83,7 @@ Motivo:
 Usado em:
 
 - `package.json`
-- `docker-compose.vps.yml`
+- `render.yaml`
 - `README.md`
 - `DEPLOY.md`
 
@@ -97,7 +97,7 @@ Motivo:
 - stack coerente
 - deploy cloud agora mais previsivel
 - healthcheck e CORS configuraveis
-- caminho seguro para Docker sem quebrar a API existente
+- caminho seguro para container gratuito sem quebrar a API existente
 
 ## Riscos principais
 
@@ -139,7 +139,7 @@ O projeto esta apto para seguir em producao com:
 
 - frontend em Next.js
 - backend funcional preservado em NestJS
-- host C# para Docker/VPS
+- host C# para Docker/Render
 - Supabase como base de dados e storage
 
 Se a meta futura continuar sendo ter toda a API em ASP.NET Core, o caminho tecnico correto e migrar modulo por modulo. Para colocar no ar agora com estabilidade, a solucao adotada foi a mais segura.
