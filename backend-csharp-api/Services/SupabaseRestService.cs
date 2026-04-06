@@ -169,7 +169,12 @@ public sealed class SupabaseRestService
 
     public async Task InsertManyAsync(string table, object payload, CancellationToken cancellationToken)
     {
-        _ = await SendJsonAsync(HttpMethod.Post, table, payload, cancellationToken);
+        using var request = new HttpRequestMessage(HttpMethod.Post, table)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(payload, JsonOptions), Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Add("Prefer", "return=minimal");
+        _ = await SendAsync(request, cancellationToken);
     }
 
     public async Task<JsonElement?> UpdateSingleAsync(string table, string filterQuery, object payload, CancellationToken cancellationToken)
