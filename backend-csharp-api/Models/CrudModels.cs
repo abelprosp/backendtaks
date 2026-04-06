@@ -53,6 +53,10 @@ public sealed class CreateClienteRequest
     [MinLength(1)]
     public string Name { get; init; } = string.Empty;
 
+    public string? TipoPessoa { get; init; }
+
+    public string? Documento { get; init; }
+
     public bool? Active { get; init; }
 }
 
@@ -60,6 +64,10 @@ public sealed class UpdateClienteRequest
 {
     [MinLength(1)]
     public string? Name { get; init; }
+
+    public string? TipoPessoa { get; init; }
+
+    public string? Documento { get; init; }
 
     public bool? Active { get; init; }
 }

@@ -27,6 +27,9 @@ Arquivos atuais:
 - `migrations/20260313_template_subtarefa_responsavel_recorrencia.sql`
 - `migrations/20260317_add_demandas_listing_detail_rpc.sql`
 - `migrations/20260317_update_demanda_statuses.sql`
+- `migrations/20260406_add_cliente_tipo_documento.sql`
+- `migrations/20260406_add_demanda_template_audit_history.sql`
+- `migrations/20260406_add_template_cliente_support.sql`
 
 ## Fluxo recomendado para produção
 

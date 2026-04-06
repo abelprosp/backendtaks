@@ -140,14 +140,16 @@ public sealed class SupabaseRestService
     public async Task<IReadOnlyList<ClienteDto>> ListClientesAsync(bool activeOnly, CancellationToken cancellationToken)
     {
         var query = activeOnly
-            ? "Cliente?select=id,name,active&active=eq.true&order=name.asc"
-            : "Cliente?select=id,name,active&order=name.asc";
+            ? "Cliente?select=id,name,active,tipo_pessoa,documento&active=eq.true&order=name.asc"
+            : "Cliente?select=id,name,active,tipo_pessoa,documento&order=name.asc";
         var rows = await GetAsync<JsonElement[]>(query, cancellationToken);
         return rows
             .Select(row => new ClienteDto(
                 row.GetStringOrEmpty("id"),
                 row.GetStringOrEmpty("name"),
-                row.GetBooleanOrDefault("active")))
+                row.GetBooleanOrDefault("active"),
+                row.GetNullableString("tipo_pessoa"),
+                row.GetNullableString("documento")))
             .ToList();
     }
 

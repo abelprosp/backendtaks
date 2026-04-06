@@ -27,7 +27,14 @@ public sealed class ClientesController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] CreateClienteRequest request, CancellationToken cancellationToken)
     {
-        return Ok(await _clientes.CreateAsync(request, cancellationToken));
+        try
+        {
+            return Ok(await _clientes.CreateAsync(request, cancellationToken));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
     }
 
     [HttpPut("{id}")]
@@ -40,6 +47,10 @@ public sealed class ClientesController : ControllerBase
         catch (KeyNotFoundException ex)
         {
             return NotFound(new { message = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
         }
     }
 

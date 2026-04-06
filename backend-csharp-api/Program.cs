@@ -31,6 +31,7 @@ builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<UsersService>();
 builder.Services.AddScoped<SetoresService>();
 builder.Services.AddScoped<ClientesService>();
+builder.Services.AddScoped<AuditTrailService>();
 builder.Services.AddScoped<TemplatesService>();
 builder.Services.AddScoped<DemandaVisibilityService>();
 builder.Services.AddScoped<DemandasService>();

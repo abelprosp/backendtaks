@@ -46,6 +46,8 @@ public sealed class CreateTemplateRequest
 
     public List<string>? SetorIds { get; init; }
 
+    public List<string>? ClienteIds { get; init; }
+
     public List<TemplateResponsavelInput>? Responsaveis { get; init; }
 
     public List<TemplateSubtarefaInput>? Subtarefas { get; init; }
@@ -75,6 +77,8 @@ public sealed class UpdateTemplateRequest
 
     public List<string>? SetorIds { get; init; }
 
+    public List<string>? ClienteIds { get; init; }
+
     public List<TemplateResponsavelInput>? Responsaveis { get; init; }
 
     public List<TemplateSubtarefaInput>? Subtarefas { get; init; }
@@ -86,6 +90,7 @@ public sealed record TemplateDemandaSubtarefa(string Titulo, string? Responsavel
 
 public sealed record TemplateDemandaSource(
     string Id,
+    string Name,
     bool PrioridadeDefault,
     string? ObservacoesGeraisTemplate,
     bool IsRecorrenteDefault,
@@ -93,5 +98,6 @@ public sealed record TemplateDemandaSource(
     string? RecorrenciaDataBaseDefault,
     int? RecorrenciaPrazoReaberturaDias,
     IReadOnlyList<string> SetorIds,
+    IReadOnlyList<string> ClienteIds,
     IReadOnlyList<TemplateDemandaResponsavel> Responsaveis,
     IReadOnlyList<TemplateDemandaSubtarefa> Subtarefas);

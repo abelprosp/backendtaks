@@ -14,6 +14,7 @@ public sealed class DemandasService
     private readonly SupabaseRestService _supabase;
     private readonly DemandaVisibilityService _visibility;
     private readonly TemplatesService _templates;
+    private readonly AuditTrailService _audit;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly AppOptions _options;
     private bool _anexosBucketReady;
@@ -22,12 +23,14 @@ public sealed class DemandasService
         SupabaseRestService supabase,
         DemandaVisibilityService visibility,
         TemplatesService templates,
+        AuditTrailService audit,
         IHttpClientFactory httpClientFactory,
         IOptions<AppOptions> options)
     {
         _supabase = supabase;
         _visibility = visibility;
         _templates = templates;
+        _audit = audit;
         _httpClientFactory = httpClientFactory;
         _options = options.Value;
     }
@@ -68,6 +71,17 @@ public sealed class DemandasService
             await UpsertRecorrenciaAsync(demandaId, request.Recorrencia, cancellationToken);
         }
 
+        await RegistrarCriacaoDemandaAsync(
+            userId,
+            demandaId,
+            request.Setores?.Count ?? 0,
+            request.ClienteIds?.Count ?? 0,
+            request.Responsaveis?.Count ?? 0,
+            request.Subtarefas?.Count ?? 0,
+            request.IsRecorrente == true && request.Recorrencia is not null,
+            null,
+            cancellationToken);
+
         return await FindOneAsync(userId, demandaId, cancellationToken);
     }
 
@@ -82,6 +96,7 @@ public sealed class DemandasService
                            && template.IsRecorrenteDefault
                            && !string.IsNullOrWhiteSpace(template.RecorrenciaTipo);
         var setorIds = request.SetorIds?.Count > 0 ? request.SetorIds : template.SetorIds;
+        var clienteIds = request.ClienteIds?.Count > 0 ? request.ClienteIds : template.ClienteIds;
         var responsaveis = request.Responsaveis?.Count > 0
             ? request.Responsaveis
             : template.Responsaveis.Select(item => new DemandaResponsavelInput
@@ -113,7 +128,7 @@ public sealed class DemandasService
         await ReplaceDemandaRelationsAsync(
             demandaId,
             setorIds,
-            request.ClienteIds,
+            clienteIds,
             responsaveis,
             subtarefas.Select((item, index) => new DemandaSubtarefaUpdateInput
             {
@@ -133,6 +148,17 @@ public sealed class DemandasService
                 PrazoReaberturaDias = template.RecorrenciaPrazoReaberturaDias,
             }, cancellationToken);
         }
+
+        await RegistrarCriacaoDemandaAsync(
+            userId,
+            demandaId,
+            setorIds?.Count ?? 0,
+            clienteIds?.Count ?? 0,
+            responsaveis.Count,
+            subtarefas.Count,
+            isRecorrente,
+            template.Name,
+            cancellationToken);
 
         return await FindOneAsync(userId, demandaId, cancellationToken);
     }
@@ -212,7 +238,8 @@ public sealed class DemandasService
             var row = rows.FirstOrDefault();
             if (row.ValueKind != JsonValueKind.Undefined)
             {
-                return MapDemandaDetailFromRpc(row);
+                var historico = await _audit.LoadDemandaEventsAsync(id, cancellationToken);
+                return MapDemandaDetailFromRpc(row, historico);
             }
         }
         catch
@@ -279,6 +306,8 @@ public sealed class DemandasService
             await _supabase.DeleteAsync("recorrencia_config", $"demanda_id=eq.{Uri.EscapeDataString(id)}", cancellationToken);
         }
 
+        await RegistrarAlteracoesDemandaAsync(userId, id, request, newStatus, cancellationToken);
+
         return await FindOneAsync(userId, id, cancellationToken);
     }
 
@@ -316,6 +345,13 @@ public sealed class DemandasService
         }
 
         await _supabase.UpdateSingleAsync("Demanda", $"id=eq.{Uri.EscapeDataString(demandaId)}", demandaUpdates, cancellationToken);
+        await _audit.AddDemandaEventAsync(
+            demandaId,
+            userId,
+            "observacao_adicionada",
+            "Observacao adicionada.",
+            null,
+            cancellationToken);
         return await FindOneAsync(userId, demandaId, cancellationToken);
     }
 
@@ -345,6 +381,14 @@ public sealed class DemandasService
             "observacao",
             $"id=eq.{Uri.EscapeDataString(observacaoId)}&demanda_id=eq.{Uri.EscapeDataString(demandaId)}",
             new { texto = texto.Trim() },
+            cancellationToken);
+
+        await _audit.AddDemandaEventAsync(
+            demandaId,
+            userId,
+            "observacao_editada",
+            "Observacao editada.",
+            new { observacaoId },
             cancellationToken);
 
         return await FindOneAsync(userId, demandaId, cancellationToken);
@@ -384,6 +428,18 @@ public sealed class DemandasService
             size,
             storage_path = BuildSupabaseStoragePath(bucket, objectPath),
         }, cancellationToken);
+
+        await _audit.AddDemandaEventAsync(
+            demandaId,
+            userId,
+            "anexo_adicionado",
+            $"Anexo adicionado: {created.GetStringOrEmpty("filename")}.",
+            new
+            {
+                anexoId = created.GetNullableString("id"),
+                filename = created.GetStringOrEmpty("filename"),
+            },
+            cancellationToken);
 
         return created.Clone();
     }
@@ -1302,7 +1358,10 @@ public sealed class DemandasService
             "demanda", "demandas", "apenas", "somente", "so", "status",
             "observacao", "observacoes", "obs", "geral", "gerais", "usuario", "user",
             "qualquer", "todo", "todos", "todas",
-            "aberto", "aberta", "andamento", "concluido", "concluida", "cancelado", "cancelada", "standby"
+            "aberto", "aberta", "andamento", "concluido", "concluida", "cancelado", "cancelada", "standby",
+            "quanta", "quantas", "quanto", "quantos", "quantidade", "numero", "número", "total", "qtd",
+            "tem", "temos", "ha", "há", "existem", "existe", "cadastrada", "cadastradas", "cadastrado", "cadastrados",
+            "hoje", "agora", "atualmente"
         };
 
         return Regex.Split(NormalizeIaText(value), "[^a-z0-9]+")
@@ -1314,6 +1373,10 @@ public sealed class DemandasService
     private static bool IsGenericPesquisaGeralPhrase(string value)
     {
         var normalized = NormalizeIaText(value);
+        if (TokenizePesquisaGeral(value).Count == 0)
+        {
+            return true;
+        }
         return string.IsNullOrWhiteSpace(normalized) ||
                normalized is "demanda" or "demandas" or "dados basicos" or "dados basico" or
                "campos basicos" or "campo basico" or "observacao" or "observacoes" or
@@ -1591,7 +1654,7 @@ public sealed class DemandasService
             MapClientes(row.GetArrayOrEmpty("clientes")));
     }
 
-    private object MapDemandaDetailFromRpc(JsonElement row)
+    private object MapDemandaDetailFromRpc(JsonElement row, IReadOnlyList<object>? historico = null)
     {
         var detail = MapDemandaListFromRpc(row);
         var recurring = row.GetOptionalProperty("recorrencia_config");
@@ -1628,6 +1691,7 @@ public sealed class DemandasService
             subtarefas = MapSubtarefas(row.GetArrayOrEmpty("subtarefas")),
             observacoes = MapObservacoes(row.GetArrayOrEmpty("observacoes")),
             anexos = row.GetArrayOrEmpty("anexos").Select(item => (object)item.Clone()).ToList(),
+            historico = historico ?? Array.Empty<object>(),
             recorrenciaConfig = recurring is JsonElement recurringValue && recurringValue.ValueKind == JsonValueKind.Object
                 ? new
                 {
@@ -1657,7 +1721,8 @@ public sealed class DemandasService
         var observacoesTask = LoadObservacoesAsync(demandaId, cancellationToken);
         var anexosTask = LoadAnexosAsync(demandaId, cancellationToken);
         var recorrenciaTask = LoadRecorrenciaAsync(demandaId, cancellationToken);
-        await Task.WhenAll(subtarefasTask, observacoesTask, anexosTask, recorrenciaTask);
+        var historicoTask = _audit.LoadDemandaEventsAsync(demandaId, cancellationToken);
+        await Task.WhenAll(subtarefasTask, observacoesTask, anexosTask, recorrenciaTask, historicoTask);
 
         var recurring = recorrenciaTask.Result;
 
@@ -1693,6 +1758,7 @@ public sealed class DemandasService
             subtarefas = subtarefasTask.Result,
             observacoes = observacoesTask.Result,
             anexos = anexosTask.Result,
+            historico = historicoTask.Result,
             recorrenciaConfig = recurring is JsonElement recurringValue && recurringValue.ValueKind == JsonValueKind.Object
                 ? new
                 {
@@ -2066,6 +2132,215 @@ public sealed class DemandasService
             tempoMedioDesdeUltimaObservacaoHoras = ParseNullableDouble(row.GetNullableString("tempo_medio_desde_ultima_observacao_horas")),
             porStatus,
         };
+    }
+
+    private async Task RegistrarCriacaoDemandaAsync(
+        string userId,
+        string demandaId,
+        int totalSetores,
+        int totalClientes,
+        int totalResponsaveis,
+        int totalSubtarefas,
+        bool recorrente,
+        string? templateName,
+        CancellationToken cancellationToken)
+    {
+        var descricao = string.IsNullOrWhiteSpace(templateName)
+            ? "Demanda criada."
+            : $"Demanda criada a partir do template \"{templateName}\".";
+
+        var detalhes = BuildResumoInicialDemanda(totalSetores, totalClientes, totalResponsaveis, totalSubtarefas, recorrente);
+        if (detalhes.Count > 0)
+        {
+            descricao += $" Configuracao inicial: {string.Join(", ", detalhes)}.";
+        }
+
+        await _audit.AddDemandaEventAsync(
+            demandaId,
+            userId,
+            string.IsNullOrWhiteSpace(templateName) ? "demanda_criada" : "demanda_criada_template",
+            descricao,
+            new
+            {
+                template = templateName,
+                setores = totalSetores,
+                clientes = totalClientes,
+                responsaveis = totalResponsaveis,
+                subtarefas = totalSubtarefas,
+                recorrente,
+            },
+            cancellationToken);
+    }
+
+    private async Task RegistrarAlteracoesDemandaAsync(
+        string userId,
+        string demandaId,
+        UpdateDemandaRequest request,
+        string? newStatus,
+        CancellationToken cancellationToken)
+    {
+        var camposBasicos = new List<string>();
+        if (request.Assunto is not null) camposBasicos.Add("assunto");
+        if (request.Prioridade.HasValue) camposBasicos.Add("prioridade");
+        if (request.Prazo is not null) camposBasicos.Add("prazo");
+        if (!string.IsNullOrWhiteSpace(newStatus)) camposBasicos.Add("status");
+        if (request.ObservacoesGerais is not null) camposBasicos.Add("observacoes gerais");
+        if (request.IsRecorrente.HasValue && request.Recorrencia is null) camposBasicos.Add("indicador de recorrencia");
+
+        if (camposBasicos.Count > 0)
+        {
+            await _audit.AddDemandaEventAsync(
+                demandaId,
+                userId,
+                "demanda_atualizada",
+                $"Campos basicos atualizados: {JoinLabels(camposBasicos)}.",
+                new
+                {
+                    campos = camposBasicos,
+                    status = newStatus,
+                },
+                cancellationToken);
+        }
+
+        if (request.Setores is not null)
+        {
+            await _audit.AddDemandaEventAsync(
+                demandaId,
+                userId,
+                "demanda_setores_atualizados",
+                $"Setores atualizados ({CountLabel(request.Setores.Count, "setor", "setores")}).",
+                new { total = request.Setores.Count },
+                cancellationToken);
+        }
+
+        if (request.ClienteIds is not null)
+        {
+            await _audit.AddDemandaEventAsync(
+                demandaId,
+                userId,
+                "demanda_clientes_atualizados",
+                $"Clientes atualizados ({CountLabel(request.ClienteIds.Count, "cliente", "clientes")}).",
+                new { total = request.ClienteIds.Count },
+                cancellationToken);
+        }
+
+        if (request.Responsaveis is not null)
+        {
+            var principals = request.Responsaveis.Count(item => item.IsPrincipal == true);
+            await _audit.AddDemandaEventAsync(
+                demandaId,
+                userId,
+                "demanda_responsaveis_atualizados",
+                $"Responsaveis atualizados ({CountLabel(request.Responsaveis.Count, "responsavel", "responsaveis")}, {CountLabel(principals, "principal", "principais")}).",
+                new
+                {
+                    total = request.Responsaveis.Count,
+                    principais = principals,
+                },
+                cancellationToken);
+        }
+
+        if (request.Subtarefas is not null)
+        {
+            var concluidas = request.Subtarefas.Count(item => item.Concluida == true);
+            await _audit.AddDemandaEventAsync(
+                demandaId,
+                userId,
+                "demanda_subtarefas_atualizadas",
+                $"Subtarefas atualizadas ({CountLabel(request.Subtarefas.Count, "item", "itens")}, {CountLabel(concluidas, "concluida", "concluidas")}).",
+                new
+                {
+                    total = request.Subtarefas.Count,
+                    concluidas,
+                },
+                cancellationToken);
+        }
+
+        if (request.Recorrencia is not null)
+        {
+            await _audit.AddDemandaEventAsync(
+                demandaId,
+                userId,
+                "demanda_recorrencia_configurada",
+                $"Recorrencia configurada: {FormatRecorrenciaDescription(request.Recorrencia)}.",
+                new
+                {
+                    tipo = request.Recorrencia.Tipo,
+                    dataBase = request.Recorrencia.DataBase,
+                    prazoReaberturaDias = request.Recorrencia.PrazoReaberturaDias,
+                },
+                cancellationToken);
+        }
+        else if (request.IsRecorrente == false)
+        {
+            await _audit.AddDemandaEventAsync(
+                demandaId,
+                userId,
+                "demanda_recorrencia_removida",
+                "Recorrencia removida.",
+                null,
+                cancellationToken);
+        }
+    }
+
+    private static List<string> BuildResumoInicialDemanda(
+        int totalSetores,
+        int totalClientes,
+        int totalResponsaveis,
+        int totalSubtarefas,
+        bool recorrente)
+    {
+        var detalhes = new List<string>();
+        if (totalSetores > 0) detalhes.Add(CountLabel(totalSetores, "setor", "setores"));
+        if (totalClientes > 0) detalhes.Add(CountLabel(totalClientes, "cliente", "clientes"));
+        if (totalResponsaveis > 0) detalhes.Add(CountLabel(totalResponsaveis, "responsavel", "responsaveis"));
+        if (totalSubtarefas > 0) detalhes.Add(CountLabel(totalSubtarefas, "subtarefa", "subtarefas"));
+        if (recorrente) detalhes.Add("recorrencia");
+        return detalhes;
+    }
+
+    private static string JoinLabels(IReadOnlyList<string> labels)
+    {
+        if (labels.Count == 0) return string.Empty;
+        if (labels.Count == 1) return labels[0];
+        if (labels.Count == 2) return $"{labels[0]} e {labels[1]}";
+        return $"{string.Join(", ", labels.Take(labels.Count - 1))} e {labels[^1]}";
+    }
+
+    private static string CountLabel(int total, string singular, string plural) =>
+        total == 1 ? $"1 {singular}" : $"{total} {plural}";
+
+    private static string FormatRecorrenciaDescription(RecorrenciaInput recorrencia)
+    {
+        var detalhes = new List<string>();
+        if (!string.IsNullOrWhiteSpace(recorrencia.Tipo))
+        {
+            detalhes.Add($"tipo {recorrencia.Tipo}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(recorrencia.DataBase))
+        {
+            detalhes.Add($"data base {FormatDateForDescription(recorrencia.DataBase)}");
+        }
+
+        if (recorrencia.PrazoReaberturaDias.HasValue)
+        {
+            detalhes.Add($"reabertura em {recorrencia.PrazoReaberturaDias.Value} dia(s)");
+        }
+
+        return detalhes.Count > 0 ? string.Join(", ", detalhes) : "configurada";
+    }
+
+    private static string FormatDateForDescription(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "sem data";
+        }
+
+        return DateTime.TryParse(value, out var parsed)
+            ? parsed.ToString("dd/MM/yyyy", CultureInfo.GetCultureInfo("pt-BR"))
+            : value;
     }
 
     private static string? NormalizeDate(string? value)

@@ -46,7 +46,7 @@ public sealed record RoleDto(string Id, string Name, string Slug);
 
 public sealed record SetorDto(string Id, string Name, string Slug);
 
-public sealed record ClienteDto(string Id, string Name, bool Active);
+public sealed record ClienteDto(string Id, string Name, bool Active, string? TipoPessoa, string? Documento);
 
 public sealed record UserDropdownDto(string Id, string Name, string Email);
 

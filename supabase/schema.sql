@@ -62,6 +62,9 @@ CREATE TABLE "user_setor_permissao" (
 CREATE TABLE "Cliente" (
   "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   "name" TEXT NOT NULL,
+  "tipo_pessoa" TEXT,
+  "documento" TEXT,
+  CONSTRAINT "Cliente_tipo_pessoa_check" CHECK ("tipo_pessoa" IS NULL OR "tipo_pessoa" IN ('pf', 'pj')),
   "active" BOOLEAN NOT NULL DEFAULT true
 );
 
@@ -118,6 +121,16 @@ CREATE TABLE "observacao" (
   "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE "demanda_evento" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "demanda_id" UUID NOT NULL REFERENCES "Demanda"("id") ON DELETE CASCADE,
+  "user_id" UUID REFERENCES "User"("id") ON DELETE SET NULL,
+  "tipo" TEXT NOT NULL,
+  "descricao" TEXT NOT NULL,
+  "metadata" JSONB,
+  "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE "anexo" (
   "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   "demanda_id" UUID NOT NULL REFERENCES "Demanda"("id") ON DELETE CASCADE,
@@ -158,6 +171,12 @@ CREATE TABLE "template_setor" (
   PRIMARY KEY ("template_id", "setor_id")
 );
 
+CREATE TABLE "template_cliente" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "template_id" UUID NOT NULL REFERENCES "Template"("id") ON DELETE CASCADE,
+  "cliente_id" UUID NOT NULL REFERENCES "Cliente"("id") ON DELETE CASCADE
+);
+
 CREATE TABLE "template_responsavel" (
   "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   "template_id" UUID NOT NULL REFERENCES "Template"("id") ON DELETE CASCADE,
@@ -173,6 +192,16 @@ CREATE TABLE "template_subtarefa" (
   "responsavel_user_id" UUID REFERENCES "User"("id") ON DELETE SET NULL
 );
 
+CREATE TABLE "template_evento" (
+  "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "template_id" UUID NOT NULL REFERENCES "Template"("id") ON DELETE CASCADE,
+  "user_id" UUID REFERENCES "User"("id") ON DELETE SET NULL,
+  "tipo" TEXT NOT NULL,
+  "descricao" TEXT NOT NULL,
+  "metadata" JSONB,
+  "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Índices sugeridos
 CREATE INDEX "Demanda_criador_id_idx" ON "Demanda"("criador_id");
 CREATE INDEX "Demanda_prazo_idx" ON "Demanda"("prazo");
@@ -181,7 +210,12 @@ CREATE INDEX "Demanda_created_at_idx" ON "Demanda"("created_at");
 CREATE INDEX "demanda_setor_setor_id_idx" ON "demanda_setor"("setor_id");
 CREATE INDEX "demanda_responsavel_user_id_idx" ON "demanda_responsavel"("user_id");
 CREATE INDEX "observacao_demanda_id_idx" ON "observacao"("demanda_id");
+CREATE INDEX "demanda_evento_demanda_id_idx" ON "demanda_evento"("demanda_id");
+CREATE INDEX "demanda_evento_created_at_idx" ON "demanda_evento"("created_at");
+CREATE INDEX "Cliente_documento_idx" ON "Cliente"("documento");
 CREATE INDEX "user_setor_permissao_user_setor_idx" ON "user_setor_permissao"("user_id", "setor_id");
+CREATE INDEX "template_evento_template_id_idx" ON "template_evento"("template_id");
+CREATE INDEX "template_evento_created_at_idx" ON "template_evento"("created_at");
 
 -- Trigger para updated_at (opcional)
 CREATE OR REPLACE FUNCTION update_updated_at()
@@ -423,6 +457,7 @@ GRANT EXECUTE ON FUNCTION public.rpc_demanda_detail(uuid) TO authenticated, serv
 create index if not exists idx_template_criador_id on public."Template" (criador_id);
 create index if not exists idx_template_updated_at on public."Template" (updated_at desc);
 create index if not exists idx_template_setor_template_id on public.template_setor (template_id);
+create index if not exists idx_template_cliente_template_id on public.template_cliente (template_id);
 create index if not exists idx_template_responsavel_template_id on public.template_responsavel (template_id);
 create index if not exists idx_template_subtarefa_template_id on public.template_subtarefa (template_id);
 
@@ -443,6 +478,7 @@ returns table (
   updated_at timestamp,
   criador jsonb,
   setores jsonb,
+  clientes jsonb,
   responsaveis jsonb,
   subtarefas jsonb
 )
@@ -489,6 +525,23 @@ as $$
       join public."Setor" s on s.id = ts.setor_id
       where ts.template_id = t.id
     ), '[]'::jsonb) as setores,
+    coalesce((
+      select jsonb_agg(
+        jsonb_build_object(
+          'cliente', jsonb_build_object(
+            'id', c.id,
+            'name', c.name,
+            'active', c.active,
+            'tipoPessoa', c.tipo_pessoa,
+            'documento', c.documento
+          )
+        )
+        order by c.name asc
+      )
+      from public.template_cliente tc
+      join public."Cliente" c on c.id = tc.cliente_id
+      where tc.template_id = t.id
+    ), '[]'::jsonb) as clientes,
     coalesce((
       select jsonb_agg(
         jsonb_build_object(
@@ -550,6 +603,7 @@ returns table (
   updated_at timestamp,
   criador jsonb,
   setores jsonb,
+  clientes jsonb,
   responsaveis jsonb,
   subtarefas jsonb
 )
