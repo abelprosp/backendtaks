@@ -61,6 +61,8 @@ public sealed class CreateDemandaRequest
 
     public bool? IsRecorrente { get; init; }
 
+    public bool? IsPrivada { get; init; }
+
     public List<string>? Setores { get; init; }
 
     public List<string>? ClienteIds { get; init; }
@@ -95,6 +97,8 @@ public sealed class UpdateDemandaRequest
 
     public bool? IsRecorrente { get; init; }
 
+    public bool? IsPrivada { get; init; }
+
     public RecorrenciaInput? Recorrencia { get; init; }
 }
 
@@ -107,6 +111,8 @@ public sealed class CreateDemandaFromTemplateRequest
     public string? Prazo { get; init; }
 
     public bool? Prioridade { get; init; }
+
+    public bool? IsPrivada { get; init; }
 
     public string? ObservacoesGerais { get; init; }
 

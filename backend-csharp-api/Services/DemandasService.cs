@@ -39,6 +39,11 @@ public sealed class DemandasService
     {
         var protocolo = await GerarProtocoloAsync(cancellationToken);
         var status = string.IsNullOrWhiteSpace(request.Status) ? "em_aberto" : request.Status;
+        var isPrivada = request.IsPrivada == true;
+        if (isPrivada && !await _visibility.CanManagePrivateDemandasAsync(userId, cancellationToken))
+        {
+            throw new InvalidOperationException("Apenas o usuario mestre autorizado pode criar demandas privadas.");
+        }
         var created = await _supabase.InsertSingleAsync("Demanda", new
         {
             protocolo,
@@ -49,6 +54,8 @@ public sealed class DemandasService
             criador_id = userId,
             observacoes_gerais = request.ObservacoesGerais,
             is_recorrente = request.IsRecorrente ?? false,
+            is_privada = isPrivada,
+            private_owner_user_id = isPrivada ? userId : null,
         }, cancellationToken);
 
         var demandaId = created.GetStringOrEmpty("id");
@@ -89,6 +96,11 @@ public sealed class DemandasService
     {
         var template = await _templates.LoadForDemandaAsync(templateId, cancellationToken);
         var protocolo = await GerarProtocoloAsync(cancellationToken);
+        var isPrivada = request.IsPrivada == true;
+        if (isPrivada && !await _visibility.CanManagePrivateDemandasAsync(userId, cancellationToken))
+        {
+            throw new InvalidOperationException("Apenas o usuario mestre autorizado pode criar demandas privadas.");
+        }
         var prioridade = request.Prioridade ?? template.PrioridadeDefault;
         var observacoesGerais = request.ObservacoesGerais ?? template.ObservacoesGeraisTemplate;
         var recorrenciaDataBase = request.RecorrenciaDataBase ?? template.RecorrenciaDataBaseDefault;
@@ -122,6 +134,8 @@ public sealed class DemandasService
             criador_id = userId,
             observacoes_gerais = observacoesGerais,
             is_recorrente = isRecorrente,
+            is_privada = isPrivada,
+            private_owner_user_id = isPrivada ? userId : null,
         }, cancellationToken);
 
         var demandaId = created.GetStringOrEmpty("id");
@@ -168,7 +182,13 @@ public sealed class DemandasService
         var pagination = GetPagination(filters);
         if (await _visibility.IsAdminAsync(userId, cancellationToken))
         {
-            return await ListAllDemandasForAdminAsync(filters, pagination, cancellationToken);
+            return await ListAllDemandasForAdminAsync(userId, filters, pagination, cancellationToken);
+        }
+
+        var visibleIds = await _visibility.VisibleDemandaIdsAsync(userId, cancellationToken);
+        if (visibleIds.Count == 0)
+        {
+            return new { data = Array.Empty<object>(), total = 0 };
         }
 
         try
@@ -178,7 +198,7 @@ public sealed class DemandasService
                 p_user_id = userId,
                 p_limit = pagination.PageSize,
                 p_offset = pagination.Offset,
-                p_ids = (object?)null,
+                p_ids = visibleIds,
                 p_cliente_id = filters.ClienteId,
                 p_assunto = filters.Assunto,
                 p_status = filters.Status,
@@ -206,12 +226,6 @@ public sealed class DemandasService
         }
         catch
         {
-            var visibleIds = await _visibility.VisibleDemandaIdsAsync(userId, cancellationToken);
-            if (visibleIds.Count == 0)
-            {
-                return new { data = Array.Empty<object>(), total = 0 };
-            }
-
             var idsClause = string.Join(",", visibleIds.Select(Uri.EscapeDataString));
             var rows = await _supabase.QueryRowsAsync(
                 $"Demanda?select=*&id=in.({idsClause})&order=created_at.desc&limit={pagination.PageSize}&offset={pagination.Offset}",
@@ -233,6 +247,18 @@ public sealed class DemandasService
 
     public async Task<object> FindOneAsync(string userId, string id, CancellationToken cancellationToken)
     {
+        var demanda = await _supabase.QuerySingleAsync(
+            $"Demanda?select=*&id=eq.{Uri.EscapeDataString(id)}&limit=1",
+            cancellationToken);
+        if (demanda is null)
+        {
+            throw new KeyNotFoundException("Demanda nao encontrada");
+        }
+        var canView = await _visibility.CanViewDemandaAsync(userId, id, cancellationToken);
+        if (!canView)
+        {
+            throw new UnauthorizedAccessException("Sem permissao para ver esta demanda");
+        }
         try
         {
             var rows = await _supabase.RpcAsync<JsonElement[]>("rpc_demanda_detail_for_user", new
@@ -250,31 +276,17 @@ public sealed class DemandasService
         catch
         {
         }
-
-        var demanda = await _supabase.QuerySingleAsync(
-            $"Demanda?select=*&id=eq.{Uri.EscapeDataString(id)}&limit=1",
-            cancellationToken);
-        if (demanda is null)
-        {
-            throw new KeyNotFoundException("Demanda não encontrada");
-        }
-
-        var canView = await _visibility.CanViewDemandaAsync(userId, id, cancellationToken);
-        if (!canView)
-        {
-            throw new UnauthorizedAccessException("Sem permissão para ver esta demanda");
-        }
-
         return await BuildDetailFromDirectRowAsync(demanda.Value, includeDetail: true, cancellationToken);
     }
 
     private async Task<object> ListAllDemandasForAdminAsync(
+        string userId,
         ListDemandasFiltersQuery filters,
         (int Page, int PageSize, int Offset) pagination,
         CancellationToken cancellationToken)
     {
-        var rows = await _supabase.QueryRowsAsync(
-            "Demanda?select=*&order=created_at.desc&limit=100000",
+        var rows = await _supabase.QueryAllRowsAsync(
+            "Demanda?select=*&order=created_at.desc",
             cancellationToken);
 
         HashSet<string>? constrainedIds = null;
@@ -340,6 +352,8 @@ public sealed class DemandasService
         }
 
         var filtered = rows
+            .Where(row => !row.GetBooleanOrDefault("is_privada")
+                          || string.Equals(row.GetNullableString("private_owner_user_id"), userId, StringComparison.Ordinal))
             .Where(row => MatchesAdminBaseFilters(row, filters))
             .Where(row =>
             {
@@ -392,6 +406,16 @@ public sealed class DemandasService
         if (request.Assunto is not null) updates["assunto"] = request.Assunto;
         if (request.Prioridade.HasValue) updates["prioridade"] = request.Prioridade.Value;
         if (request.Prazo is not null) updates["prazo"] = request.Prazo;
+        if (request.IsPrivada.HasValue)
+        {
+            if (!await _visibility.CanManagePrivateDemandasAsync(userId, cancellationToken))
+            {
+                throw new InvalidOperationException("Apenas o usuario mestre autorizado pode alterar a privacidade da demanda.");
+            }
+
+            updates["is_privada"] = request.IsPrivada.Value;
+            updates["private_owner_user_id"] = request.IsPrivada.Value ? userId : null;
+        }
         if (!string.IsNullOrWhiteSpace(newStatus))
         {
             updates["status"] = newStatus;
@@ -808,9 +832,9 @@ public sealed class DemandasService
 
     private async Task<IaReferenceData> LoadIaReferenceDataAsync(CancellationToken cancellationToken)
     {
-        var setoresTask = _supabase.QueryRowsAsync("Setor?select=id,name&order=name.asc", cancellationToken);
-        var clientesTask = _supabase.QueryRowsAsync("Cliente?select=id,name,active&active=eq.true&order=name.asc", cancellationToken);
-        var usersTask = _supabase.QueryRowsAsync("User?select=id,name,active&active=eq.true&order=name.asc", cancellationToken);
+        var setoresTask = _supabase.QueryAllRowsAsync("Setor?select=id,name&order=name.asc", cancellationToken);
+        var clientesTask = _supabase.QueryAllRowsAsync("Cliente?select=id,name,active&active=eq.true&order=name.asc", cancellationToken);
+        var usersTask = _supabase.QueryAllRowsAsync("User?select=id,name,active&active=eq.true&order=name.asc", cancellationToken);
         await Task.WhenAll(setoresTask, clientesTask, usersTask);
 
         return new IaReferenceData(
@@ -1785,6 +1809,7 @@ public sealed class DemandasService
             criadorId = row.GetNullableString("criador_id"),
             observacoesGerais = row.GetNullableString("observacoes_gerais"),
             isRecorrente = row.GetBooleanOrDefault("is_recorrente"),
+            isPrivada = row.GetBooleanOrDefault("is_privada"),
             demandaOrigemId = row.GetNullableString("demanda_origem_id"),
             createdAt = NormalizeDate(row.GetNullableString("created_at")),
             updatedAt = NormalizeDate(row.GetNullableString("updated_at")),
@@ -1852,6 +1877,7 @@ public sealed class DemandasService
             criadorId = row.GetNullableString("criador_id"),
             observacoesGerais = row.GetNullableString("observacoes_gerais"),
             isRecorrente = row.GetBooleanOrDefault("is_recorrente"),
+            isPrivada = row.GetBooleanOrDefault("is_privada"),
             demandaOrigemId = row.GetNullableString("demanda_origem_id"),
             createdAt = NormalizeDate(row.GetNullableString("created_at")),
             updatedAt = NormalizeDate(row.GetNullableString("updated_at")),
@@ -1917,6 +1943,7 @@ public sealed class DemandasService
             criadorId = row.GetNullableString("criador_id"),
             observacoesGerais = row.GetNullableString("observacoes_gerais"),
             isRecorrente = row.GetBooleanOrDefault("is_recorrente"),
+            isPrivada = row.GetBooleanOrDefault("is_privada"),
             demandaOrigemId = row.GetNullableString("demanda_origem_id"),
             createdAt,
             updatedAt = NormalizeDate(row.GetNullableString("updated_at")) ?? row.GetNullableString("updated_at"),
@@ -2479,8 +2506,8 @@ public sealed class DemandasService
             "demanda_id",
             cancellationToken));
 
-        var recurringRows = await _supabase.QueryRowsAsync(
-            "recorrencia_config?select=demanda_id,tipo,data_base,prazo_reabertura_dias&limit=100000",
+        var recurringRows = await _supabase.QueryAllRowsAsync(
+            "recorrencia_config?select=demanda_id,tipo,data_base,prazo_reabertura_dias",
             cancellationToken);
         foreach (var row in recurringRows)
         {
@@ -2506,7 +2533,7 @@ public sealed class DemandasService
 
     private async Task<HashSet<string>> LoadIdsAsync(string query, string fieldName, CancellationToken cancellationToken)
     {
-        var rows = await _supabase.QueryRowsAsync(query, cancellationToken);
+        var rows = await _supabase.QueryAllRowsAsync(query, cancellationToken);
         return rows
             .Select(row => row.GetStringOrEmpty(fieldName))
             .Where(id => !string.IsNullOrWhiteSpace(id))

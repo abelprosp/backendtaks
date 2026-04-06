@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using LuxusDemandas.Api.Configuration;
 using LuxusDemandas.Api.Models;
+using LuxusDemandas.Api.Security;
 using LuxusDemandas.Api.Support;
 using Microsoft.Extensions.Options;
 
@@ -41,7 +42,7 @@ public sealed class SupabaseRestService
     public async Task<TokenUser?> FindUserByEmailAsync(string email, CancellationToken cancellationToken)
     {
         var normalizedEmail = email.ToLowerInvariant().Trim();
-        var rows = await GetAsync<JsonElement[]>($"User?select=id,email,password_hash,name,active&email=eq.{Uri.EscapeDataString(normalizedEmail)}&limit=1", cancellationToken);
+        var rows = await GetAsync<JsonElement[]>($"User?select=id,email,password_hash,name,active,needs_password_setup&email=eq.{Uri.EscapeDataString(normalizedEmail)}&limit=1", cancellationToken);
         var row = rows.FirstOrDefault();
         if (row.ValueKind == JsonValueKind.Undefined)
         {
@@ -53,7 +54,7 @@ public sealed class SupabaseRestService
 
     public async Task<TokenUser?> FindUserByIdAsync(string id, CancellationToken cancellationToken)
     {
-        var rows = await GetAsync<JsonElement[]>($"User?select=id,email,password_hash,name,active&id=eq.{Uri.EscapeDataString(id)}&limit=1", cancellationToken);
+        var rows = await GetAsync<JsonElement[]>($"User?select=id,email,password_hash,name,active,needs_password_setup&id=eq.{Uri.EscapeDataString(id)}&limit=1", cancellationToken);
         var row = rows.FirstOrDefault();
         if (row.ValueKind == JsonValueKind.Undefined)
         {
@@ -65,7 +66,7 @@ public sealed class SupabaseRestService
 
     public async Task<IReadOnlyList<UserDropdownDto>> ListUsersForDropdownAsync(CancellationToken cancellationToken)
     {
-        var rows = await GetAsync<JsonElement[]>("User?select=id,name,email&active=eq.true&order=name.asc", cancellationToken);
+        var rows = await QueryAllRowsAsync("User?select=id,name,email&active=eq.true&order=name.asc", cancellationToken);
         return rows
             .Select(row => new UserDropdownDto(
                 row.GetStringOrEmpty("id"),
@@ -87,8 +88,8 @@ public sealed class SupabaseRestService
 
     public async Task<IReadOnlyList<UserListDto>> ListAllUsersAsync(CancellationToken cancellationToken)
     {
-        var users = await GetAsync<JsonElement[]>("User?select=id,name,email,active,created_at&order=name.asc", cancellationToken);
-        var roleLinks = await GetAsync<JsonElement[]>("user_role?select=user_id,role_id", cancellationToken);
+        var users = await QueryAllRowsAsync("User?select=id,name,email,active,created_at,password_hash,needs_password_setup&order=name.asc", cancellationToken);
+        var roleLinks = await QueryAllRowsAsync("user_role?select=user_id,role_id", cancellationToken);
         var roles = await ListRolesAsync(cancellationToken);
         var roleMap = roles.ToDictionary(role => role.Id, role => role);
 
@@ -121,14 +122,16 @@ public sealed class SupabaseRestService
                     row.GetStringOrEmpty("email"),
                     row.GetBooleanOrDefault("active"),
                     row.GetNullableString("created_at"),
-                    mappedRoles ?? []);
+                    mappedRoles ?? [],
+                    row.GetBooleanOrDefault("needs_password_setup")
+                    || PasswordAccessDefaults.IsPlaceholderHash(row.GetNullableString("password_hash"), _options.LegacyImportedPasswordHash));
             })
             .ToList();
     }
 
     public async Task<IReadOnlyList<SetorDto>> ListSetoresAsync(CancellationToken cancellationToken)
     {
-        var rows = await GetAsync<JsonElement[]>("Setor?select=id,name,slug&order=name.asc", cancellationToken);
+        var rows = await QueryAllRowsAsync("Setor?select=id,name,slug&order=name.asc", cancellationToken);
         return rows
             .Select(row => new SetorDto(
                 row.GetStringOrEmpty("id"),
@@ -142,7 +145,7 @@ public sealed class SupabaseRestService
         var query = activeOnly
             ? "Cliente?select=id,name,active,tipo_pessoa,documento&active=eq.true&order=name.asc"
             : "Cliente?select=id,name,active,tipo_pessoa,documento&order=name.asc";
-        var rows = await GetAsync<JsonElement[]>(query, cancellationToken);
+        var rows = await QueryAllRowsAsync(query, cancellationToken);
         return rows
             .Select(row => new ClienteDto(
                 row.GetStringOrEmpty("id"),
@@ -155,6 +158,31 @@ public sealed class SupabaseRestService
 
     public async Task<JsonElement[]> QueryRowsAsync(string pathAndQuery, CancellationToken cancellationToken) =>
         await GetAsync<JsonElement[]>(pathAndQuery, cancellationToken);
+
+    public async Task<JsonElement[]> QueryAllRowsAsync(string pathAndQuery, CancellationToken cancellationToken, int batchSize = 1000)
+    {
+        var rows = new List<JsonElement>();
+        var offset = 0;
+
+        while (true)
+        {
+            var batch = await GetAsync<JsonElement[]>(AppendLimitAndOffset(pathAndQuery, batchSize, offset), cancellationToken);
+            if (batch.Length == 0)
+            {
+                break;
+            }
+
+            rows.AddRange(batch.Select(item => item.Clone()));
+            if (batch.Length < batchSize)
+            {
+                break;
+            }
+
+            offset += batchSize;
+        }
+
+        return rows.ToArray();
+    }
 
     public async Task<JsonElement?> QuerySingleAsync(string pathAndQuery, CancellationToken cancellationToken)
     {
@@ -279,6 +307,7 @@ public sealed class SupabaseRestService
             row.GetStringOrEmpty("name"),
             row.GetBooleanOrDefault("active"),
             row.GetStringOrEmpty("password_hash"),
+            row.GetBooleanOrDefault("needs_password_setup"),
             mappedRoles);
     }
 
@@ -414,5 +443,21 @@ public sealed class SupabaseRestService
         }
 
         return null;
+    }
+
+    private static string AppendLimitAndOffset(string pathAndQuery, int limit, int offset)
+    {
+        var sanitized = System.Text.RegularExpressions.Regex.Replace(
+            pathAndQuery,
+            @"([?&])(limit|offset)=\d+(&)?",
+            match =>
+            {
+                var suffix = match.Groups[3].Success ? match.Groups[1].Value : string.Empty;
+                return suffix;
+            },
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        sanitized = sanitized.TrimEnd('&', '?');
+        var separator = sanitized.Contains('?', StringComparison.Ordinal) ? "&" : "?";
+        return $"{sanitized}{separator}limit={limit}&offset={offset}";
     }
 }
