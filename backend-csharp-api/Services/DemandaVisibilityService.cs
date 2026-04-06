@@ -26,41 +26,43 @@ public sealed class DemandaVisibilityService
                 .ToArray();
         }
 
-        try
+        var asCriadorTask = _supabase.QueryAllRowsAsync(
+            $"Demanda?select=id&criador_id=eq.{Uri.EscapeDataString(userId)}",
+            cancellationToken);
+        var asResponsavelTask = _supabase.QueryAllRowsAsync(
+            $"demanda_responsavel?select=demanda_id&user_id=eq.{Uri.EscapeDataString(userId)}",
+            cancellationToken);
+        var bySetorTask = _supabase.QueryAllRowsAsync(
+            $"user_setor_permissao?select=setor_id&user_id=eq.{Uri.EscapeDataString(userId)}&can_view=eq.true",
+            cancellationToken);
+
+        await Task.WhenAll(asCriadorTask, asResponsavelTask, bySetorTask);
+
+        var ids = new HashSet<string>(
+            asCriadorTask.Result
+                .Select(row => row.GetStringOrEmpty("id"))
+                .Where(id => !string.IsNullOrWhiteSpace(id)));
+
+        foreach (var item in asResponsavelTask.Result)
         {
-            var rows = await _supabase.RpcAsync<JsonElement[]>("rpc_visible_demanda_ids", new
+            var demandaId = item.GetStringOrEmpty("demanda_id");
+            if (!string.IsNullOrWhiteSpace(demandaId))
             {
-                p_user_id = userId,
-            }, cancellationToken);
-
-            var ids = rows
-                .Select(row => row.GetStringOrEmpty("demanda_id"))
-                .Where(id => !string.IsNullOrWhiteSpace(id))
-                .Distinct()
-                .ToArray();
-
-            return await FilterPrivateDemandIdsAsync(userId, ids, cancellationToken);
+                ids.Add(demandaId);
+            }
         }
-        catch
+
+        var setorIds = bySetorTask.Result
+            .Select(row => row.GetStringOrEmpty("setor_id"))
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct()
+            .ToArray();
+        if (setorIds.Length > 0)
         {
-            var asCriadorTask = _supabase.QueryAllRowsAsync(
-                $"Demanda?select=id&criador_id=eq.{Uri.EscapeDataString(userId)}",
+            var demandaSetores = await _supabase.QueryAllRowsAsync(
+                $"demanda_setor?select=demanda_id&setor_id=in.({string.Join(",", setorIds.Select(Uri.EscapeDataString))})",
                 cancellationToken);
-            var asResponsavelTask = _supabase.QueryAllRowsAsync(
-                $"demanda_responsavel?select=demanda_id&user_id=eq.{Uri.EscapeDataString(userId)}",
-                cancellationToken);
-            var bySetorTask = _supabase.QueryAllRowsAsync(
-                $"user_setor_permissao?select=setor_id&user_id=eq.{Uri.EscapeDataString(userId)}&can_view=eq.true",
-                cancellationToken);
-
-            await Task.WhenAll(asCriadorTask, asResponsavelTask, bySetorTask);
-
-            var ids = new HashSet<string>(
-                asCriadorTask.Result
-                    .Select(row => row.GetStringOrEmpty("id"))
-                    .Where(id => !string.IsNullOrWhiteSpace(id)));
-
-            foreach (var item in asResponsavelTask.Result)
+            foreach (var item in demandaSetores)
             {
                 var demandaId = item.GetStringOrEmpty("demanda_id");
                 if (!string.IsNullOrWhiteSpace(demandaId))
@@ -68,29 +70,9 @@ public sealed class DemandaVisibilityService
                     ids.Add(demandaId);
                 }
             }
-
-            var setorIds = bySetorTask.Result
-                .Select(row => row.GetStringOrEmpty("setor_id"))
-                .Where(id => !string.IsNullOrWhiteSpace(id))
-                .Distinct()
-                .ToArray();
-            if (setorIds.Length > 0)
-            {
-                var demandaSetores = await _supabase.QueryAllRowsAsync(
-                    $"demanda_setor?select=demanda_id&setor_id=in.({string.Join(",", setorIds.Select(Uri.EscapeDataString))})",
-                    cancellationToken);
-                foreach (var item in demandaSetores)
-                {
-                    var demandaId = item.GetStringOrEmpty("demanda_id");
-                    if (!string.IsNullOrWhiteSpace(demandaId))
-                    {
-                        ids.Add(demandaId);
-                    }
-                }
-            }
-
-            return await FilterPrivateDemandIdsAsync(userId, ids, cancellationToken);
         }
+
+        return await FilterPrivateDemandIdsAsync(userId, ids, cancellationToken);
     }
 
     public async Task<bool> CanViewDemandaAsync(string userId, string demandaId, CancellationToken cancellationToken)
