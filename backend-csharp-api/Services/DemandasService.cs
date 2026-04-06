@@ -166,6 +166,11 @@ public sealed class DemandasService
     public async Task<object> ListAsync(string userId, ListDemandasFiltersQuery filters, CancellationToken cancellationToken)
     {
         var pagination = GetPagination(filters);
+        if (await _visibility.IsAdminAsync(userId, cancellationToken))
+        {
+            return await ListAllDemandasForAdminAsync(filters, pagination, cancellationToken);
+        }
+
         try
         {
             var rows = await _supabase.RpcAsync<JsonElement[]>("rpc_list_demandas_page", new
@@ -261,6 +266,116 @@ public sealed class DemandasService
         }
 
         return await BuildDetailFromDirectRowAsync(demanda.Value, includeDetail: true, cancellationToken);
+    }
+
+    private async Task<object> ListAllDemandasForAdminAsync(
+        ListDemandasFiltersQuery filters,
+        (int Page, int PageSize, int Offset) pagination,
+        CancellationToken cancellationToken)
+    {
+        var rows = await _supabase.QueryRowsAsync(
+            "Demanda?select=*&order=created_at.desc&limit=100000",
+            cancellationToken);
+
+        HashSet<string>? constrainedIds = null;
+
+        if (!string.IsNullOrWhiteSpace(filters.ClienteId))
+        {
+            constrainedIds = IntersectIds(
+                constrainedIds,
+                await LoadIdsAsync(
+                    $"demanda_cliente?select=demanda_id&cliente_id=eq.{Uri.EscapeDataString(filters.ClienteId)}&limit=100000",
+                    "demanda_id",
+                    cancellationToken));
+        }
+
+        if (!string.IsNullOrWhiteSpace(filters.ResponsavelPrincipalId))
+        {
+            constrainedIds = IntersectIds(
+                constrainedIds,
+                await LoadIdsAsync(
+                    $"demanda_responsavel?select=demanda_id&user_id=eq.{Uri.EscapeDataString(filters.ResponsavelPrincipalId)}&is_principal=eq.true&limit=100000",
+                    "demanda_id",
+                    cancellationToken));
+        }
+
+        if (filters.SetorIds?.Count > 0)
+        {
+            constrainedIds = IntersectIds(
+                constrainedIds,
+                await LoadIdsAsync(
+                    $"demanda_setor?select=demanda_id&setor_id=in.({string.Join(",", filters.SetorIds.Select(Uri.EscapeDataString))})&limit=100000",
+                    "demanda_id",
+                    cancellationToken));
+        }
+
+        if (!string.IsNullOrWhiteSpace(filters.TipoRecorrencia))
+        {
+            constrainedIds = IntersectIds(
+                constrainedIds,
+                await LoadIdsAsync(
+                    $"recorrencia_config?select=demanda_id&tipo=eq.{Uri.EscapeDataString(filters.TipoRecorrencia)}&limit=100000",
+                    "demanda_id",
+                    cancellationToken));
+        }
+
+        if (!string.IsNullOrWhiteSpace(filters.PesquisarTarefaOuObservacao))
+        {
+            var search = BuildIlikeValue(filters.PesquisarTarefaOuObservacao);
+            var subtarefaIds = await LoadIdsAsync(
+                $"subtarefa?select=demanda_id&titulo=ilike.{search}&limit=100000",
+                "demanda_id",
+                cancellationToken);
+            var observacaoIds = await LoadIdsAsync(
+                $"observacao?select=demanda_id&texto=ilike.{search}&limit=100000",
+                "demanda_id",
+                cancellationToken);
+            constrainedIds = IntersectIds(constrainedIds, UnionIds(subtarefaIds, observacaoIds));
+        }
+
+        HashSet<string>? pesquisaGeralIds = null;
+        if (!string.IsNullOrWhiteSpace(filters.PesquisaGeral))
+        {
+            pesquisaGeralIds = await BuildAdminPesquisaGeralIdsAsync(filters.PesquisaGeral, cancellationToken);
+        }
+
+        var filtered = rows
+            .Where(row => MatchesAdminBaseFilters(row, filters))
+            .Where(row =>
+            {
+                var demandaId = row.GetStringOrEmpty("id");
+                if (constrainedIds is not null && !constrainedIds.Contains(demandaId))
+                {
+                    return false;
+                }
+
+                if (string.IsNullOrWhiteSpace(filters.PesquisaGeral))
+                {
+                    return true;
+                }
+
+                return MatchesAdminPesquisaGeralBase(row, filters.PesquisaGeral!)
+                    || (pesquisaGeralIds?.Contains(demandaId) ?? false);
+            })
+            .OrderByDescending(row => ParseDate(row.GetNullableString("created_at")) ?? DateTime.MinValue)
+            .ToList();
+
+        var pageRows = filtered
+            .Skip(pagination.Offset)
+            .Take(pagination.PageSize)
+            .ToArray();
+
+        var data = new List<object>(pageRows.Length);
+        foreach (var row in pageRows)
+        {
+            data.Add(await BuildDetailFromDirectRowAsync(row, includeDetail: false, cancellationToken));
+        }
+
+        return new
+        {
+            data,
+            total = filtered.Count,
+        };
     }
 
     public async Task<object> UpdateAsync(string userId, string id, UpdateDemandaRequest request, CancellationToken cancellationToken)
@@ -2309,6 +2424,223 @@ public sealed class DemandasService
 
     private static string CountLabel(int total, string singular, string plural) =>
         total == 1 ? $"1 {singular}" : $"{total} {plural}";
+
+    private async Task<HashSet<string>> BuildAdminPesquisaGeralIdsAsync(string search, CancellationToken cancellationToken)
+    {
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        var ilike = BuildIlikeValue(search);
+
+        var matchingUsers = await LoadIdsAsync(
+            $"User?select=id&or=(name.ilike.{ilike},email.ilike.{ilike})&limit=100000",
+            "id",
+            cancellationToken);
+        if (matchingUsers.Count > 0)
+        {
+            ids.UnionWith(await LoadIdsAsync(
+                $"Demanda?select=id&criador_id=in.({string.Join(",", matchingUsers.Select(Uri.EscapeDataString))})&limit=100000",
+                "id",
+                cancellationToken));
+            ids.UnionWith(await LoadIdsAsync(
+                $"demanda_responsavel?select=demanda_id&user_id=in.({string.Join(",", matchingUsers.Select(Uri.EscapeDataString))})&limit=100000",
+                "demanda_id",
+                cancellationToken));
+        }
+
+        var matchingSetores = await LoadIdsAsync(
+            $"Setor?select=id&or=(name.ilike.{ilike},slug.ilike.{ilike})&limit=100000",
+            "id",
+            cancellationToken);
+        if (matchingSetores.Count > 0)
+        {
+            ids.UnionWith(await LoadIdsAsync(
+                $"demanda_setor?select=demanda_id&setor_id=in.({string.Join(",", matchingSetores.Select(Uri.EscapeDataString))})&limit=100000",
+                "demanda_id",
+                cancellationToken));
+        }
+
+        var matchingClientes = await LoadIdsAsync(
+            $"Cliente?select=id&name=ilike.{ilike}&limit=100000",
+            "id",
+            cancellationToken);
+        if (matchingClientes.Count > 0)
+        {
+            ids.UnionWith(await LoadIdsAsync(
+                $"demanda_cliente?select=demanda_id&cliente_id=in.({string.Join(",", matchingClientes.Select(Uri.EscapeDataString))})&limit=100000",
+                "demanda_id",
+                cancellationToken));
+        }
+
+        ids.UnionWith(await LoadIdsAsync(
+            $"subtarefa?select=demanda_id&titulo=ilike.{ilike}&limit=100000",
+            "demanda_id",
+            cancellationToken));
+        ids.UnionWith(await LoadIdsAsync(
+            $"observacao?select=demanda_id&texto=ilike.{ilike}&limit=100000",
+            "demanda_id",
+            cancellationToken));
+
+        var recurringRows = await _supabase.QueryRowsAsync(
+            "recorrencia_config?select=demanda_id,tipo,data_base,prazo_reabertura_dias&limit=100000",
+            cancellationToken);
+        foreach (var row in recurringRows)
+        {
+            var recurringText = string.Join(" ", new[]
+            {
+                row.GetNullableString("tipo"),
+                row.GetNullableString("data_base"),
+                row.GetNullableString("prazo_reabertura_dias"),
+            }.Where(value => !string.IsNullOrWhiteSpace(value)));
+
+            if (ContainsIgnoreCase(recurringText, search))
+            {
+                var demandaId = row.GetStringOrEmpty("demanda_id");
+                if (!string.IsNullOrWhiteSpace(demandaId))
+                {
+                    ids.Add(demandaId);
+                }
+            }
+        }
+
+        return ids;
+    }
+
+    private async Task<HashSet<string>> LoadIdsAsync(string query, string fieldName, CancellationToken cancellationToken)
+    {
+        var rows = await _supabase.QueryRowsAsync(query, cancellationToken);
+        return rows
+            .Select(row => row.GetStringOrEmpty(fieldName))
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToHashSet(StringComparer.Ordinal);
+    }
+
+    private static HashSet<string> UnionIds(HashSet<string> first, HashSet<string> second)
+    {
+        var result = new HashSet<string>(first, StringComparer.Ordinal);
+        result.UnionWith(second);
+        return result;
+    }
+
+    private static HashSet<string> IntersectIds(HashSet<string>? current, HashSet<string> next)
+    {
+        if (current is null)
+        {
+            return new HashSet<string>(next, StringComparer.Ordinal);
+        }
+
+        current.IntersectWith(next);
+        return current;
+    }
+
+    private static bool MatchesAdminBaseFilters(JsonElement row, ListDemandasFiltersQuery filters)
+    {
+        if (!string.IsNullOrWhiteSpace(filters.Assunto)
+            && !ContainsIgnoreCase(row.GetStringOrEmpty("assunto"), filters.Assunto))
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(filters.Status)
+            && !string.Equals(row.GetStringOrEmpty("status"), filters.Status, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(filters.Protocolo)
+            && !ContainsIgnoreCase(row.GetStringOrEmpty("protocolo"), filters.Protocolo))
+        {
+            return false;
+        }
+
+        if (filters.Prioridade.HasValue && row.GetBooleanOrDefault("prioridade") != filters.Prioridade.Value)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(filters.CriadorId)
+            && !string.Equals(row.GetNullableString("criador_id"), filters.CriadorId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var createdAt = ParseDate(row.GetNullableString("created_at"));
+        var prazo = ParseDate(row.GetNullableString("prazo"));
+        var status = row.GetStringOrEmpty("status");
+
+        var dataCriacaoDe = ParseDate(filters.DataCriacaoDe);
+        if (dataCriacaoDe.HasValue && (!createdAt.HasValue || createdAt.Value.Date < dataCriacaoDe.Value.Date))
+        {
+            return false;
+        }
+
+        var dataCriacaoAte = ParseDate(filters.DataCriacaoAte);
+        if (dataCriacaoAte.HasValue && (!createdAt.HasValue || createdAt.Value.Date > dataCriacaoAte.Value.Date))
+        {
+            return false;
+        }
+
+        var prazoDe = ParseDate(filters.PrazoDe);
+        if (prazoDe.HasValue && (!prazo.HasValue || prazo.Value.Date < prazoDe.Value.Date))
+        {
+            return false;
+        }
+
+        var prazoAte = ParseDate(filters.PrazoAte);
+        if (prazoAte.HasValue && (!prazo.HasValue || prazo.Value.Date > prazoAte.Value.Date))
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(filters.CondicaoPrazo))
+        {
+            var today = DateTime.UtcNow.Date;
+            var condicao = filters.CondicaoPrazo.Trim();
+            if (string.Equals(condicao, "finalizada", StringComparison.Ordinal) && !string.Equals(status, "concluido", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (string.Equals(condicao, "vencido", StringComparison.Ordinal)
+                && (!prazo.HasValue || prazo.Value.Date >= today))
+            {
+                return false;
+            }
+
+            if (string.Equals(condicao, "no_prazo", StringComparison.Ordinal)
+                && (!prazo.HasValue || prazo.Value.Date < today))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool MatchesAdminPesquisaGeralBase(JsonElement row, string search)
+    {
+        var aggregate = string.Join(" ", new[]
+        {
+            row.GetStringOrEmpty("protocolo"),
+            row.GetStringOrEmpty("assunto"),
+            row.GetStringOrEmpty("status"),
+            row.GetBooleanOrDefault("prioridade") ? "prioridade urgente sim" : "prioridade nao",
+            row.GetNullableString("observacoes_gerais"),
+            row.GetNullableString("prazo"),
+            row.GetNullableString("created_at"),
+            row.GetNullableString("resolvido_em"),
+            row.GetNullableString("ultima_observacao_em"),
+            row.GetBooleanOrDefault("is_recorrente") ? "recorrente" : "nao recorrente",
+        }.Where(value => !string.IsNullOrWhiteSpace(value)));
+
+        return ContainsIgnoreCase(aggregate, search);
+    }
+
+    private static bool ContainsIgnoreCase(string? source, string? value) =>
+        !string.IsNullOrWhiteSpace(source)
+        && !string.IsNullOrWhiteSpace(value)
+        && source.Contains(value, StringComparison.OrdinalIgnoreCase);
+
+    private static string BuildIlikeValue(string raw) =>
+        Uri.EscapeDataString($"*{raw.Trim()}*");
 
     private static string FormatRecorrenciaDescription(RecorrenciaInput recorrencia)
     {

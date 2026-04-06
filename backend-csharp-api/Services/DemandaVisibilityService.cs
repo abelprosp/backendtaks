@@ -14,6 +14,16 @@ public sealed class DemandaVisibilityService
 
     public async Task<IReadOnlyList<string>> VisibleDemandaIdsAsync(string userId, CancellationToken cancellationToken)
     {
+        if (await IsAdminAsync(userId, cancellationToken))
+        {
+            var allRows = await _supabase.QueryRowsAsync("Demanda?select=id&limit=100000", cancellationToken);
+            return allRows
+                .Select(row => row.GetStringOrEmpty("id"))
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct()
+                .ToArray();
+        }
+
         try
         {
             var rows = await _supabase.RpcAsync<JsonElement[]>("rpc_visible_demanda_ids", new
@@ -81,7 +91,33 @@ public sealed class DemandaVisibilityService
 
     public async Task<bool> CanViewDemandaAsync(string userId, string demandaId, CancellationToken cancellationToken)
     {
+        if (await IsAdminAsync(userId, cancellationToken))
+        {
+            return true;
+        }
+
         var ids = await VisibleDemandaIdsAsync(userId, cancellationToken);
         return ids.Contains(demandaId, StringComparer.Ordinal);
+    }
+
+    public async Task<bool> IsAdminAsync(string userId, CancellationToken cancellationToken)
+    {
+        var roleLinks = await _supabase.QueryRowsAsync(
+            $"user_role?select=role_id&user_id=eq.{Uri.EscapeDataString(userId)}",
+            cancellationToken);
+        var roleIds = roleLinks
+            .Select(row => row.GetStringOrEmpty("role_id"))
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct()
+            .ToArray();
+        if (roleIds.Length == 0)
+        {
+            return false;
+        }
+
+        var roles = await _supabase.QueryRowsAsync(
+            $"Role?select=slug&id=in.({string.Join(",", roleIds.Select(Uri.EscapeDataString))})",
+            cancellationToken);
+        return roles.Any(role => string.Equals(role.GetStringOrEmpty("slug"), "admin", StringComparison.Ordinal));
     }
 }
