@@ -5,7 +5,11 @@ namespace LuxusDemandas.Api.Services;
 
 public sealed class DemandaVisibilityService
 {
-    private const string PrivateDemandMasterEmail = "rafael@luxustelefonia.com.br";
+    private static readonly HashSet<string> PrivateDemandMasterEmails = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "rafael@luxustelefonia.com.br",
+        "redobrai@gmail.com",
+    };
     private readonly SupabaseRestService _supabase;
 
     public DemandaVisibilityService(SupabaseRestService supabase)
@@ -15,11 +19,12 @@ public sealed class DemandaVisibilityService
 
     public async Task<IReadOnlyList<string>> VisibleDemandaIdsAsync(string userId, CancellationToken cancellationToken)
     {
+        var canViewAllPrivateDemandas = await CanManagePrivateDemandasAsync(userId, cancellationToken);
         if (await IsAdminAsync(userId, cancellationToken))
         {
             var allRows = await _supabase.QueryAllRowsAsync("Demanda?select=id,is_privada,private_owner_user_id", cancellationToken);
             return allRows
-                .Where(row => IsDemandVisibleToUser(row, userId))
+                .Where(row => IsDemandVisibleToUser(row, userId, canViewAllPrivateDemandas))
                 .Select(row => row.GetStringOrEmpty("id"))
                 .Where(id => !string.IsNullOrWhiteSpace(id))
                 .Distinct()
@@ -72,7 +77,7 @@ public sealed class DemandaVisibilityService
             }
         }
 
-        return await FilterPrivateDemandIdsAsync(userId, ids, cancellationToken);
+        return await FilterPrivateDemandIdsAsync(userId, ids, canViewAllPrivateDemandas, cancellationToken);
     }
 
     public async Task<bool> CanViewDemandaAsync(string userId, string demandaId, CancellationToken cancellationToken)
@@ -85,7 +90,8 @@ public sealed class DemandaVisibilityService
             return false;
         }
 
-        if (!IsDemandVisibleToUser(demanda.Value, userId))
+        var canViewAllPrivateDemandas = await CanManagePrivateDemandasAsync(userId, cancellationToken);
+        if (!IsDemandVisibleToUser(demanda.Value, userId, canViewAllPrivateDemandas))
         {
             return false;
         }
@@ -124,13 +130,14 @@ public sealed class DemandaVisibilityService
     {
         var user = await _supabase.FindUserByIdAsync(userId, cancellationToken);
         return user is not null
-               && string.Equals(user.Email, PrivateDemandMasterEmail, StringComparison.OrdinalIgnoreCase)
+               && PrivateDemandMasterEmails.Contains(user.Email)
                && await IsAdminAsync(userId, cancellationToken);
     }
 
     private async Task<IReadOnlyList<string>> FilterPrivateDemandIdsAsync(
         string userId,
         IEnumerable<string> ids,
+        bool canViewAllPrivateDemandas,
         CancellationToken cancellationToken)
     {
         var idList = ids
@@ -147,16 +154,21 @@ public sealed class DemandaVisibilityService
             cancellationToken);
 
         return rows
-            .Where(row => IsDemandVisibleToUser(row, userId))
+            .Where(row => IsDemandVisibleToUser(row, userId, canViewAllPrivateDemandas))
             .Select(row => row.GetStringOrEmpty("id"))
             .Where(id => !string.IsNullOrWhiteSpace(id))
             .Distinct()
             .ToArray();
     }
 
-    private static bool IsDemandVisibleToUser(JsonElement row, string userId)
+    private static bool IsDemandVisibleToUser(JsonElement row, string userId, bool canViewAllPrivateDemandas)
     {
         if (!row.GetBooleanOrDefault("is_privada"))
+        {
+            return true;
+        }
+
+        if (canViewAllPrivateDemandas)
         {
             return true;
         }
