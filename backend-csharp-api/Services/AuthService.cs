@@ -108,6 +108,90 @@ public sealed class AuthService
         };
     }
 
+    public async Task<AuthUser> UpdateProfileAsync(string userId, UpdateProfileRequest request, CancellationToken cancellationToken)
+    {
+        var currentUser = await _supabase.FindUserByIdAsync(userId, cancellationToken);
+        if (currentUser is null || !currentUser.Active)
+        {
+            throw new KeyNotFoundException("Usuário não encontrado.");
+        }
+
+        var currentName = currentUser.Name.Trim();
+        var currentEmail = currentUser.Email.Trim();
+        var normalizedName = request.Name?.Trim();
+        var normalizedEmail = request.Email?.Trim().ToLowerInvariant();
+        var hasNameChange = !string.IsNullOrWhiteSpace(normalizedName) && !string.Equals(normalizedName, currentName, StringComparison.Ordinal);
+        var hasEmailChange = !string.IsNullOrWhiteSpace(normalizedEmail) && !string.Equals(normalizedEmail, currentEmail, StringComparison.OrdinalIgnoreCase);
+        var hasPasswordChange = !string.IsNullOrWhiteSpace(request.NewPassword);
+        var requiresCurrentPassword = hasEmailChange || hasPasswordChange;
+
+        if (!hasNameChange && !hasEmailChange && !hasPasswordChange)
+        {
+            return new AuthUser(currentUser.Id, currentUser.Email, currentUser.Name, currentUser.Roles);
+        }
+
+        if (requiresCurrentPassword)
+        {
+            if (string.IsNullOrWhiteSpace(request.CurrentPassword))
+            {
+                throw new InvalidOperationException("Informe a senha atual para alterar e-mail ou senha.");
+            }
+
+            if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, currentUser.PasswordHash))
+            {
+                throw new InvalidOperationException("Senha atual inválida.");
+            }
+        }
+
+        if (hasEmailChange)
+        {
+            var existingUser = await _supabase.QuerySingleAsync(
+                $"User?select=id&email=eq.{Uri.EscapeDataString(normalizedEmail!)}&id=neq.{Uri.EscapeDataString(userId)}&limit=1",
+                cancellationToken);
+            if (existingUser is not null)
+            {
+                throw new InvalidOperationException("Esse e-mail já está em uso por outro usuário.");
+            }
+        }
+
+        var updates = new Dictionary<string, object?>();
+        if (hasNameChange)
+        {
+            updates["name"] = normalizedName;
+        }
+
+        if (hasEmailChange)
+        {
+            updates["email"] = normalizedEmail;
+        }
+
+        if (hasPasswordChange)
+        {
+            if (request.NewPassword!.Trim().Length < 6)
+            {
+                throw new InvalidOperationException("A nova senha precisa ter ao menos 6 caracteres.");
+            }
+
+            if (BCrypt.Net.BCrypt.Verify(request.NewPassword, currentUser.PasswordHash))
+            {
+                throw new InvalidOperationException("A nova senha precisa ser diferente da senha atual.");
+            }
+
+            updates["password_hash"] = BCrypt.Net.BCrypt.HashPassword(request.NewPassword.Trim(), 10);
+        }
+
+        _ = await _supabase.UpdateSingleAsync(
+            "User",
+            $"id=eq.{Uri.EscapeDataString(userId)}",
+            updates,
+            cancellationToken);
+
+        var refreshedUser = await _supabase.FindUserByIdAsync(userId, cancellationToken)
+                            ?? throw new InvalidOperationException("Não foi possível atualizar o perfil.");
+
+        return new AuthUser(refreshedUser.Id, refreshedUser.Email, refreshedUser.Name, refreshedUser.Roles);
+    }
+
     public static AuthUser MapAuthenticatedUser(ClaimsPrincipal principal)
     {
         var roles = principal.FindAll("role_slug")

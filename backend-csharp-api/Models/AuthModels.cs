@@ -4,6 +4,12 @@ public sealed record LoginRequest(string Email, string Password);
 
 public sealed record RefreshRequest(string RefreshToken);
 
+public sealed record UpdateProfileRequest(
+    string? Name,
+    string? Email,
+    string? CurrentPassword,
+    string? NewPassword);
+
 public sealed record BootstrapQuery(
     bool IncludeSetores,
     bool IncludeClientes,

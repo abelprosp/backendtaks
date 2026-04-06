@@ -50,6 +50,25 @@ public sealed class AuthController : ControllerBase
     }
 
     [Authorize]
+    [HttpPut("me")]
+    public async Task<IActionResult> UpdateProfile([FromBody] UpdateProfileRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var user = AuthService.MapAuthenticatedUser(User);
+            return Ok(await _authService.UpdateProfileAsync(user.Id, request, cancellationToken));
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    [Authorize]
     [HttpGet("bootstrap")]
     public async Task<IActionResult> Bootstrap(
         [FromQuery] bool includeSetores = false,
