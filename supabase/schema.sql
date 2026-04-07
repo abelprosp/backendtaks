@@ -61,9 +61,25 @@ CREATE TABLE "user_setor_permissao" (
 
 CREATE TABLE "Cliente" (
   "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "legacy_id" TEXT,
   "name" TEXT NOT NULL,
   "tipo_pessoa" TEXT,
   "documento" TEXT,
+  "nome_fantasia" TEXT,
+  "ramo_atividade" TEXT,
+  "inscricao_estadual" TEXT,
+  "cep" TEXT,
+  "endereco" TEXT,
+  "numero" TEXT,
+  "complemento" TEXT,
+  "bairro" TEXT,
+  "cidade" TEXT,
+  "uf" TEXT,
+  "telefone" TEXT,
+  "celular" TEXT,
+  "contato" TEXT,
+  "email" TEXT,
+  "observacoes_cadastro" TEXT,
   CONSTRAINT "Cliente_tipo_pessoa_check" CHECK ("tipo_pessoa" IS NULL OR "tipo_pessoa" IN ('pf', 'pj')),
   "active" BOOLEAN NOT NULL DEFAULT true
 );
@@ -213,6 +229,7 @@ CREATE INDEX "observacao_demanda_id_idx" ON "observacao"("demanda_id");
 CREATE INDEX "demanda_evento_demanda_id_idx" ON "demanda_evento"("demanda_id");
 CREATE INDEX "demanda_evento_created_at_idx" ON "demanda_evento"("created_at");
 CREATE INDEX "Cliente_documento_idx" ON "Cliente"("documento");
+CREATE UNIQUE INDEX IF NOT EXISTS "Cliente_legacy_id_uidx" ON "Cliente"("legacy_id") WHERE "legacy_id" IS NOT NULL;
 CREATE INDEX "user_setor_permissao_user_setor_idx" ON "user_setor_permissao"("user_id", "setor_id");
 CREATE INDEX "template_evento_template_id_idx" ON "template_evento"("template_id");
 CREATE INDEX "template_evento_created_at_idx" ON "template_evento"("created_at");

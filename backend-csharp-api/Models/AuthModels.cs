@@ -52,7 +52,28 @@ public sealed record RoleDto(string Id, string Name, string Slug);
 
 public sealed record SetorDto(string Id, string Name, string Slug);
 
-public sealed record ClienteDto(string Id, string Name, bool Active, string? TipoPessoa, string? Documento);
+public sealed record ClienteDto(
+    string Id,
+    string Name,
+    bool Active,
+    string? TipoPessoa,
+    string? Documento,
+    string? NomeFantasia,
+    string? RamoAtividade,
+    string? InscricaoEstadual,
+    string? Cep,
+    string? Endereco,
+    string? Numero,
+    string? Complemento,
+    string? Bairro,
+    string? Cidade,
+    string? Uf,
+    string? Telefone,
+    string? Celular,
+    string? Contato,
+    string? Email,
+    string? ObservacoesCadastro,
+    string? LegacyId);
 
 public sealed record UserDropdownDto(string Id, string Name, string Email);
 

@@ -8,9 +8,8 @@ public sealed class CreateUserRequest
     [EmailAddress]
     public string Email { get; init; } = string.Empty;
 
-    [Required]
     [MinLength(6)]
-    public string Password { get; init; } = string.Empty;
+    public string? Password { get; init; }
 
     [Required]
     [MinLength(1)]
@@ -57,6 +56,36 @@ public sealed class CreateClienteRequest
 
     public string? Documento { get; init; }
 
+    public string? NomeFantasia { get; init; }
+
+    public string? RamoAtividade { get; init; }
+
+    public string? InscricaoEstadual { get; init; }
+
+    public string? Cep { get; init; }
+
+    public string? Endereco { get; init; }
+
+    public string? Numero { get; init; }
+
+    public string? Complemento { get; init; }
+
+    public string? Bairro { get; init; }
+
+    public string? Cidade { get; init; }
+
+    public string? Uf { get; init; }
+
+    public string? Telefone { get; init; }
+
+    public string? Celular { get; init; }
+
+    public string? Contato { get; init; }
+
+    public string? Email { get; init; }
+
+    public string? ObservacoesCadastro { get; init; }
+
     public bool? Active { get; init; }
 }
 
@@ -68,6 +97,36 @@ public sealed class UpdateClienteRequest
     public string? TipoPessoa { get; init; }
 
     public string? Documento { get; init; }
+
+    public string? NomeFantasia { get; init; }
+
+    public string? RamoAtividade { get; init; }
+
+    public string? InscricaoEstadual { get; init; }
+
+    public string? Cep { get; init; }
+
+    public string? Endereco { get; init; }
+
+    public string? Numero { get; init; }
+
+    public string? Complemento { get; init; }
+
+    public string? Bairro { get; init; }
+
+    public string? Cidade { get; init; }
+
+    public string? Uf { get; init; }
+
+    public string? Telefone { get; init; }
+
+    public string? Celular { get; init; }
+
+    public string? Contato { get; init; }
+
+    public string? Email { get; init; }
+
+    public string? ObservacoesCadastro { get; init; }
 
     public bool? Active { get; init; }
 }

@@ -143,8 +143,8 @@ public sealed class SupabaseRestService
     public async Task<IReadOnlyList<ClienteDto>> ListClientesAsync(bool activeOnly, CancellationToken cancellationToken)
     {
         var query = activeOnly
-            ? "Cliente?select=id,name,active,tipo_pessoa,documento&active=eq.true&order=name.asc"
-            : "Cliente?select=id,name,active,tipo_pessoa,documento&order=name.asc";
+            ? "Cliente?select=id,name,active,tipo_pessoa,documento,nome_fantasia,ramo_atividade,inscricao_estadual,cep,endereco,numero,complemento,bairro,cidade,uf,telefone,celular,contato,email,observacoes_cadastro,legacy_id&active=eq.true&order=name.asc"
+            : "Cliente?select=id,name,active,tipo_pessoa,documento,nome_fantasia,ramo_atividade,inscricao_estadual,cep,endereco,numero,complemento,bairro,cidade,uf,telefone,celular,contato,email,observacoes_cadastro,legacy_id&order=name.asc";
         var rows = await QueryAllRowsAsync(query, cancellationToken);
         return rows
             .Select(row => new ClienteDto(
@@ -152,7 +152,23 @@ public sealed class SupabaseRestService
                 row.GetStringOrEmpty("name"),
                 row.GetBooleanOrDefault("active"),
                 row.GetNullableString("tipo_pessoa"),
-                row.GetNullableString("documento")))
+                row.GetNullableString("documento"),
+                row.GetNullableString("nome_fantasia"),
+                row.GetNullableString("ramo_atividade"),
+                row.GetNullableString("inscricao_estadual"),
+                row.GetNullableString("cep"),
+                row.GetNullableString("endereco"),
+                row.GetNullableString("numero"),
+                row.GetNullableString("complemento"),
+                row.GetNullableString("bairro"),
+                row.GetNullableString("cidade"),
+                row.GetNullableString("uf"),
+                row.GetNullableString("telefone"),
+                row.GetNullableString("celular"),
+                row.GetNullableString("contato"),
+                row.GetNullableString("email"),
+                row.GetNullableString("observacoes_cadastro"),
+                row.GetNullableString("legacy_id")))
             .ToList();
     }
 
