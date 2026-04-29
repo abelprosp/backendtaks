@@ -42,7 +42,7 @@ public sealed class DemandasService
         var isPrivada = request.IsPrivada == true;
         if (isPrivada && !await _visibility.CanManagePrivateDemandasAsync(userId, cancellationToken))
         {
-            throw new InvalidOperationException("Apenas o usuario mestre autorizado pode criar demandas privadas.");
+            throw new InvalidOperationException("Apenas usuários ADM podem criar demandas privadas.");
         }
         var created = await _supabase.InsertSingleAsync("Demanda", new
         {
@@ -99,7 +99,7 @@ public sealed class DemandasService
         var isPrivada = request.IsPrivada == true;
         if (isPrivada && !await _visibility.CanManagePrivateDemandasAsync(userId, cancellationToken))
         {
-            throw new InvalidOperationException("Apenas o usuario mestre autorizado pode criar demandas privadas.");
+            throw new InvalidOperationException("Apenas usuários ADM podem criar demandas privadas.");
         }
         var prioridade = request.Prioridade ?? template.PrioridadeDefault;
         var observacoesGerais = request.ObservacoesGerais ?? template.ObservacoesGeraisTemplate;
@@ -191,6 +191,20 @@ public sealed class DemandasService
             return new { data = Array.Empty<object>(), total = 0 };
         }
 
+        if (!string.IsNullOrWhiteSpace(filters.ResponsavelPrincipalId))
+        {
+            var principalFilter = filters.ResponsavelApenasPrincipal == true ? "&is_principal=eq.true" : string.Empty;
+            var responsavelIds = await LoadIdsAsync(
+                $"demanda_responsavel?select=demanda_id&user_id=eq.{Uri.EscapeDataString(filters.ResponsavelPrincipalId)}{principalFilter}&limit=100000",
+                "demanda_id",
+                cancellationToken);
+            visibleIds = visibleIds.Where(responsavelIds.Contains).ToList();
+            if (visibleIds.Count == 0)
+            {
+                return new { data = Array.Empty<object>(), total = 0 };
+            }
+        }
+
         try
         {
             var rows = await _supabase.RpcAsync<JsonElement[]>("rpc_list_demandas_page", new
@@ -206,7 +220,7 @@ public sealed class DemandasService
                 p_protocolo = filters.Protocolo,
                 p_prioridade = filters.Prioridade,
                 p_criador_id = filters.CriadorId,
-                p_responsavel_principal_id = filters.ResponsavelPrincipalId,
+                p_responsavel_principal_id = null as string,
                 p_setor_ids = filters.SetorIds?.Count > 0 ? filters.SetorIds : null,
                 p_condicao_prazo = filters.CondicaoPrazo,
                 p_pesquisa_tarefa_ou_observacao = filters.PesquisarTarefaOuObservacao,
@@ -285,6 +299,7 @@ public sealed class DemandasService
         (int Page, int PageSize, int Offset) pagination,
         CancellationToken cancellationToken)
     {
+        var canViewAllPrivateDemandas = await _visibility.CanManagePrivateDemandasAsync(userId, cancellationToken);
         var rows = await _supabase.QueryAllRowsAsync(
             "Demanda?select=*&order=created_at.desc",
             cancellationToken);
@@ -303,10 +318,11 @@ public sealed class DemandasService
 
         if (!string.IsNullOrWhiteSpace(filters.ResponsavelPrincipalId))
         {
+            var principalFilter = filters.ResponsavelApenasPrincipal == true ? "&is_principal=eq.true" : string.Empty;
             constrainedIds = IntersectIds(
                 constrainedIds,
                 await LoadIdsAsync(
-                    $"demanda_responsavel?select=demanda_id&user_id=eq.{Uri.EscapeDataString(filters.ResponsavelPrincipalId)}&is_principal=eq.true&limit=100000",
+                    $"demanda_responsavel?select=demanda_id&user_id=eq.{Uri.EscapeDataString(filters.ResponsavelPrincipalId)}{principalFilter}&limit=100000",
                     "demanda_id",
                     cancellationToken));
         }
@@ -352,8 +368,20 @@ public sealed class DemandasService
         }
 
         var filtered = rows
-            .Where(row => !row.GetBooleanOrDefault("is_privada")
-                          || string.Equals(row.GetNullableString("private_owner_user_id"), userId, StringComparison.Ordinal))
+            .Where(row =>
+            {
+                if (!row.GetBooleanOrDefault("is_privada"))
+                {
+                    return true;
+                }
+
+                if (canViewAllPrivateDemandas)
+                {
+                    return true;
+                }
+
+                return string.Equals(row.GetNullableString("private_owner_user_id"), userId, StringComparison.Ordinal);
+            })
             .Where(row => MatchesAdminBaseFilters(row, filters))
             .Where(row =>
             {
@@ -371,10 +399,11 @@ public sealed class DemandasService
                 return MatchesAdminPesquisaGeralBase(row, filters.PesquisaGeral!)
                     || (pesquisaGeralIds?.Contains(demandaId) ?? false);
             })
-            .OrderByDescending(row => ParseDate(row.GetNullableString("created_at")) ?? DateTime.MinValue)
             .ToList();
 
-        var pageRows = filtered
+        var ordered = ApplyDemandasSort(filtered, filters).ToList();
+
+        var pageRows = ordered
             .Skip(pagination.Offset)
             .Take(pagination.PageSize)
             .ToArray();
@@ -388,7 +417,7 @@ public sealed class DemandasService
         return new
         {
             data,
-            total = filtered.Count,
+            total = ordered.Count,
         };
     }
 
@@ -633,6 +662,7 @@ public sealed class DemandasService
             Prioridade = filters.Prioridade,
             CriadorId = filters.CriadorId,
             ResponsavelPrincipalId = filters.ResponsavelPrincipalId,
+            ResponsavelApenasPrincipal = filters.ResponsavelApenasPrincipal,
             SetorIds = filters.SetorIds?.ToList(),
             CondicaoPrazo = filters.CondicaoPrazo,
             PesquisarTarefaOuObservacao = filters.PesquisarTarefaOuObservacao,
@@ -759,8 +789,13 @@ public sealed class DemandasService
         _ = avaliarComIa;
         try
         {
-            var rows = await _supabase.RpcAsync<JsonElement[]>("rpc_dashboard_kpis", new { }, cancellationToken);
-            var row = rows.FirstOrDefault();
+            var rpcResult = await _supabase.RpcAsync<JsonElement>("rpc_dashboard_kpis", new { }, cancellationToken);
+            var row = rpcResult.ValueKind switch
+            {
+                JsonValueKind.Array => rpcResult.EnumerateArray().FirstOrDefault(),
+                JsonValueKind.Object => rpcResult,
+                _ => default,
+            };
             if (row.ValueKind != JsonValueKind.Undefined)
             {
                 return new
@@ -773,8 +808,8 @@ public sealed class DemandasService
         {
         }
 
-        var rowsFallback = await _supabase.QueryRowsAsync(
-            "Demanda?select=id,status,created_at,updated_at,resolvido_em,ultima_observacao_em&order=created_at.desc&limit=5000",
+        var rowsFallback = await _supabase.QueryAllRowsAsync(
+            "Demanda?select=id,status,created_at,updated_at,resolvido_em,ultima_observacao_em&order=created_at.desc",
             cancellationToken);
         var now = DateTime.UtcNow;
         var concluidas = rowsFallback.Where(row => string.Equals(row.GetStringOrEmpty("status"), "concluido", StringComparison.Ordinal)).ToList();
@@ -828,6 +863,150 @@ public sealed class DemandasService
         var requestedPageSize = Math.Max(filters.PageSize ?? 100, 1);
         var pageSize = Math.Min(requestedPageSize, 10_000);
         return (page, pageSize, (page - 1) * pageSize);
+    }
+
+    private static IEnumerable<JsonElement> ApplyDemandasSort(IReadOnlyList<JsonElement> rows, ListDemandasFiltersQuery filters)
+    {
+        var sortBy = NormalizeSortBy(filters.SortBy);
+        var descending = NormalizeSortDirection(filters.SortDirection, sortBy) == "desc";
+
+        return sortBy switch
+        {
+            "id" => OrderByText(rows, row => row.GetNullableString("id"), descending),
+            "createdAt" => OrderByDate(rows, row => row.GetNullableString("created_at"), descending),
+            "protocolo" => OrderByText(rows, row => row.GetNullableString("protocolo"), descending),
+            "prioridade" => OrderByBoolean(rows, row => row.GetBooleanOrDefault("prioridade"), descending),
+            "assunto" => OrderByText(rows, row => row.GetNullableString("assunto"), descending),
+            "prazo" => OrderByDate(rows, row => row.GetNullableString("prazo"), descending),
+            "status" => OrderByStatus(rows, descending),
+            _ => OrderByDefaultDemandas(rows),
+        };
+    }
+
+    private static string? NormalizeSortBy(string? value)
+    {
+        var normalized = value?.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return null;
+        }
+
+        return normalized switch
+        {
+            "id" => "id",
+            "createdAt" => "createdAt",
+            "protocolo" => "protocolo",
+            "prioridade" => "prioridade",
+            "cliente" => "cliente",
+            "assunto" => "assunto",
+            "criador" => "criador",
+            "responsaveis" => "responsaveis",
+            "prazo" => "prazo",
+            "status" => "status",
+            _ => null,
+        };
+    }
+
+    private static string NormalizeSortDirection(string? value, string? sortBy)
+    {
+        var normalized = value?.Trim().ToLowerInvariant();
+        if (normalized is "asc" or "desc")
+        {
+            return normalized;
+        }
+
+        return sortBy is "createdAt" or "prioridade" or "prazo" ? "desc" : "asc";
+    }
+
+    private static IOrderedEnumerable<JsonElement> OrderByDefaultDemandas(IEnumerable<JsonElement> rows) =>
+        rows
+            .OrderByDescending(row => row.GetBooleanOrDefault("prioridade"))
+            .ThenBy(row => DateSortTicks(row.GetNullableString("prazo"), descending: false))
+            .ThenByDescending(row => DateSortTicks(row.GetNullableString("created_at"), descending: true))
+            .ThenBy(row => row.GetNullableString("protocolo") ?? string.Empty, StringComparer.Create(new CultureInfo("pt-BR"), ignoreCase: true));
+
+    private static IOrderedEnumerable<JsonElement> OrderByDate(
+        IEnumerable<JsonElement> rows,
+        Func<JsonElement, string?> selector,
+        bool descending)
+    {
+        var ordered = descending
+            ? rows.OrderByDescending(row => DateSortTicks(selector(row), descending: true))
+            : rows.OrderBy(row => DateSortTicks(selector(row), descending: false));
+
+        return ordered
+            .ThenByDescending(row => DateSortTicks(row.GetNullableString("created_at"), descending: true))
+            .ThenBy(row => row.GetNullableString("protocolo") ?? string.Empty, StringComparer.Create(new CultureInfo("pt-BR"), ignoreCase: true));
+    }
+
+    private static IOrderedEnumerable<JsonElement> OrderByText(
+        IEnumerable<JsonElement> rows,
+        Func<JsonElement, string?> selector,
+        bool descending)
+    {
+        var comparer = StringComparer.Create(new CultureInfo("pt-BR"), ignoreCase: true);
+        var ordered = descending
+            ? rows
+                .OrderBy(row => string.IsNullOrWhiteSpace(selector(row)) ? 1 : 0)
+                .ThenByDescending(row => selector(row) ?? string.Empty, comparer)
+            : rows
+                .OrderBy(row => string.IsNullOrWhiteSpace(selector(row)) ? 1 : 0)
+                .ThenBy(row => selector(row) ?? string.Empty, comparer);
+
+        return ordered
+            .ThenByDescending(row => DateSortTicks(row.GetNullableString("created_at"), descending: true))
+            .ThenBy(row => row.GetNullableString("protocolo") ?? string.Empty, comparer);
+    }
+
+    private static IOrderedEnumerable<JsonElement> OrderByBoolean(
+        IEnumerable<JsonElement> rows,
+        Func<JsonElement, bool> selector,
+        bool descending)
+    {
+        var ordered = descending
+            ? rows.OrderByDescending(selector)
+            : rows.OrderBy(selector);
+
+        return ordered
+            .ThenBy(row => DateSortTicks(row.GetNullableString("prazo"), descending: false))
+            .ThenByDescending(row => DateSortTicks(row.GetNullableString("created_at"), descending: true));
+    }
+
+    private static IOrderedEnumerable<JsonElement> OrderByStatus(IEnumerable<JsonElement> rows, bool descending)
+    {
+        var ordered = descending
+            ? rows
+                .OrderBy(row => StatusSortWeight(row.GetNullableString("status")) >= 999 ? 1 : 0)
+                .ThenByDescending(row => StatusSortWeight(row.GetNullableString("status")))
+            : rows
+                .OrderBy(row => StatusSortWeight(row.GetNullableString("status")) >= 999 ? 1 : 0)
+                .ThenBy(row => StatusSortWeight(row.GetNullableString("status")));
+
+        return ordered
+            .ThenByDescending(row => DateSortTicks(row.GetNullableString("created_at"), descending: true))
+            .ThenBy(row => row.GetNullableString("protocolo") ?? string.Empty, StringComparer.Create(new CultureInfo("pt-BR"), ignoreCase: true));
+    }
+
+    private static int StatusSortWeight(string? value) =>
+        value switch
+        {
+            "em_aberto" => 1,
+            "em_andamento" => 2,
+            "standby" => 3,
+            "concluido" => 4,
+            "cancelado" => 5,
+            _ => 999,
+        };
+
+    private static long DateSortTicks(string? value, bool descending)
+    {
+        var date = ParseDate(value);
+        if (!date.HasValue)
+        {
+            return descending ? long.MinValue : long.MaxValue;
+        }
+
+        return date.Value.Ticks;
     }
 
     private async Task<IaReferenceData> LoadIaReferenceDataAsync(CancellationToken cancellationToken)
@@ -1275,6 +1454,7 @@ public sealed class DemandasService
         if (filters.Prioridade.HasValue) Add("prioridade", filters.Prioridade.Value ? "true" : "false");
         Add("criadorId", filters.CriadorId);
         Add("responsavelPrincipalId", filters.ResponsavelPrincipalId);
+        if (filters.ResponsavelApenasPrincipal.HasValue) Add("responsavelApenasPrincipal", filters.ResponsavelApenasPrincipal.Value ? "true" : "false");
         if (filters.SetorIds?.Count > 0)
         {
             parameters.AddRange(filters.SetorIds.Select(setorId => $"setorIds={Uri.EscapeDataString(setorId)}"));

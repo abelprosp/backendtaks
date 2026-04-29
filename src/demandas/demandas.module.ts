@@ -5,9 +5,10 @@ import { DemandaVisibilityService } from './demanda-visibility.service';
 import { RecorrenciaService } from './recorrencia.service';
 import { TemplatesModule } from '../templates/templates.module';
 import { AdminGuard } from '../auth/admin.guard';
+import { IaContextModule } from '../ia-context/ia-context.module';
 
 @Module({
-  imports: [TemplatesModule],
+  imports: [TemplatesModule, IaContextModule],
   providers: [DemandasService, DemandaVisibilityService, RecorrenciaService, AdminGuard],
   controllers: [DemandasController],
   exports: [DemandasService, RecorrenciaService],

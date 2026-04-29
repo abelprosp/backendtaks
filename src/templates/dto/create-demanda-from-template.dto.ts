@@ -48,7 +48,7 @@ export class CreateDemandaFromTemplateDto {
   /** Sobrescrever subtarefas do template (opcional). Se não enviado, usa do template. */
   @IsOptional()
   @IsArray()
-  subtarefas?: { titulo: string }[];
+  subtarefas?: { titulo: string; responsavelUserId?: string }[];
 
   /** Se demanda será recorrente; data base para a recorrência */
   @IsOptional()

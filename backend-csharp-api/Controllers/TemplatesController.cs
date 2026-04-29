@@ -70,6 +70,11 @@ public sealed class TemplatesController : ControllerBase
     [HttpDelete("{id}")]
     public async Task<IActionResult> Remove(string id, CancellationToken cancellationToken)
     {
+        if (!User.HasRoleSlug("admin"))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "Apenas usuários ADM podem excluir templates." });
+        }
+
         try
         {
             return Ok(await _templates.RemoveAsync(id, cancellationToken));

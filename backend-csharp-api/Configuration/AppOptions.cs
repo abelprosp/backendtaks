@@ -11,7 +11,16 @@ public sealed class AppOptions
     public string JwtRefreshSecret { get; set; } = string.Empty;
     public string JwtExpiresIn { get; set; } = "15m";
     public string RefreshExpiresIn { get; set; } = "7d";
+    public string PasswordAccessTokenExpiresIn { get; set; } = "24h";
+    public string LegacyImportedPasswordHash { get; set; } = string.Empty;
     public string OpenAiApiKey { get; set; } = string.Empty;
     public string SupabaseStorageBucket { get; set; } = "demandas-anexos";
+    public string SmtpHost { get; set; } = string.Empty;
+    public int SmtpPort { get; set; } = 587;
+    public string SmtpUsername { get; set; } = string.Empty;
+    public string SmtpPassword { get; set; } = string.Empty;
+    public string SmtpFromEmail { get; set; } = string.Empty;
+    public string SmtpFromName { get; set; } = "Luxus Demandas";
+    public bool SmtpUseSsl { get; set; } = true;
     public string NodeEnv { get; set; } = "development";
 }

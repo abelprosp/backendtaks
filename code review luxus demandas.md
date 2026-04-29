@@ -3,9 +3,23 @@
 ## Estado atual
 
 - Frontend principal em Next.js + TypeScript, fora deste repositório, publicado na Vercel.
-- Backend principal em ASP.NET Core 8 + C# em `backend-csharp-api/`.
+- Backend principal em ASP.NET Core 8 + C# em `backend-csharp-api/`, publicado no Render.
 - Banco e storage em Supabase.
 - Backend NestJS antigo mantido em `src/` apenas como legado técnico e referência de migração.
+
+## Hospedagem atual
+
+- Frontend
+  Vercel
+  Benefícios: melhor encaixe com Next.js, deploy simples, CDN e gerenciamento rápido de envs e redeploy.
+
+- Backend
+  Render
+  Benefícios: aceita Docker com pouco atrito, oferece healthcheck, logs e operação simples para API HTTP.
+
+- Banco e storage
+  Supabase
+  Benefícios: Postgres gerenciado, buckets de anexos e operação SQL centralizada.
 
 ## Alocação por parte
 
@@ -35,8 +49,8 @@
   Foi escolhido para consolidar o backend principal em ASP.NET Core com tipagem forte, autenticação nativa e deploy limpo em container.
 
 - TypeScript
-  Ainda existe em `src/**/*.ts` como backend legado e no frontend fora deste repositório.
-  Foi mantido para referência técnica e rollback controlado, sem apagar a implementação anterior.
+  Usado no frontend em Next.js e mantido em `src/**/*.ts` como backend legado.
+  Foi escolhido no frontend pela segurança de tipos com React/Next.js e foi mantido no backend legado para referência técnica e rollback controlado.
 
 - SQL
   Usado em `supabase/schema.sql` e `supabase/migrations/*.sql`.
@@ -61,4 +75,9 @@
 
 ## Conclusão
 
-O backend principal deste repositório agora está alocado em `backend-csharp-api/` e em C#. O NestJS foi preservado apenas como legado técnico. O próximo passo operacional é publicar esse estado no GitHub e forçar um novo deploy do Render para que a produção passe a usar a API ASP.NET Core como origem real.
+- Frontend: Next.js + TypeScript, hospedado na Vercel.
+- Backend principal: ASP.NET Core 8 + C#, hospedado no Render.
+- Banco e storage: Supabase/Postgres.
+- Backend legado: NestJS + TypeScript, mantido apenas como referência técnica.
+
+O sistema está alocado de forma clara: a camada visual fica na Vercel, a API principal fica no Render e os dados ficam no Supabase. Essa divisão faz sentido porque combina cada parte com a plataforma mais adequada à stack e reduz complexidade operacional.

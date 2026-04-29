@@ -34,12 +34,17 @@ public sealed class UsersService
             throw new InvalidOperationException("E-mail já cadastrado");
         }
 
-        var passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password, 10);
+        var normalizedPassword = string.IsNullOrWhiteSpace(request.Password) ? null : request.Password.Trim();
+        var needsPasswordSetup = string.IsNullOrWhiteSpace(normalizedPassword);
+        var passwordHash = needsPasswordSetup
+            ? BCrypt.Net.BCrypt.HashPassword(Guid.NewGuid().ToString("N"), 10)
+            : BCrypt.Net.BCrypt.HashPassword(normalizedPassword, 10);
         var created = await _supabase.InsertSingleAsync("User", new
         {
             email = normalizedEmail,
             password_hash = passwordHash,
             name = request.Name.Trim(),
+            needs_password_setup = needsPasswordSetup,
         }, cancellationToken);
 
         var userId = created.GetStringOrEmpty("id");
@@ -59,6 +64,7 @@ public sealed class UsersService
             active = created.GetBooleanOrDefault("active"),
             createdAt = created.GetNullableString("created_at"),
             updatedAt = created.GetNullableString("updated_at"),
+            needsPasswordSetup,
             roles,
         };
     }

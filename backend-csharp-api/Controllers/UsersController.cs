@@ -12,10 +12,12 @@ namespace LuxusDemandas.Api.Controllers;
 public sealed class UsersController : ControllerBase
 {
     private readonly UsersService _users;
+    private readonly AuthService _authService;
 
-    public UsersController(UsersService users)
+    public UsersController(UsersService users, AuthService authService)
     {
         _users = users;
+        _authService = authService;
     }
 
     [HttpGet("dropdown")]
@@ -65,6 +67,29 @@ public sealed class UsersController : ControllerBase
         try
         {
             return Ok(await _users.UpdateAsync(id, request, cancellationToken));
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    [HttpPost("{id}/password-link")]
+    public async Task<IActionResult> GeneratePasswordAccessLink(string id, CancellationToken cancellationToken)
+    {
+        if (!User.HasRoleSlug("admin"))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "Apenas usuario master (administrador) pode realizar esta acao." });
+        }
+
+        try
+        {
+            var actor = AuthService.MapAuthenticatedUser(User);
+            return Ok(await _authService.GeneratePasswordAccessLinkAsync(id, actor.Id, cancellationToken));
         }
         catch (KeyNotFoundException ex)
         {

@@ -8,6 +8,7 @@ import { ClientesModule } from './clientes/clientes.module';
 import { DemandasModule } from './demandas/demandas.module';
 import { TemplatesModule } from './templates/templates.module';
 import { HealthModule } from './health/health.module';
+import { IaContextModule } from './ia-context/ia-context.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { HealthModule } from './health/health.module';
     DemandasModule,
     TemplatesModule,
     HealthModule,
+    IaContextModule,
   ],
 })
 export class AppModule {}

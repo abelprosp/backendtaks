@@ -1,5 +1,16 @@
-import { IsOptional, IsString, IsUUID, IsBoolean, IsDateString, IsEnum, IsArray } from 'class-validator';
-import { Type } from 'class-transformer';
+import { IsOptional, IsString, IsUUID, IsBoolean, IsDateString, IsEnum, IsArray, IsInt, Min, Max } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+
+function queryBoolean(value: unknown): boolean | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'sim'].includes(normalized)) return true;
+    if (['false', '0', 'nao', 'não'].includes(normalized)) return false;
+  }
+  return undefined;
+}
 
 export class ListDemandasFiltersDto {
   @IsOptional()
@@ -11,7 +22,7 @@ export class ListDemandasFiltersDto {
   assunto?: string;
 
   @IsOptional()
-  @IsEnum(['em_aberto', 'concluido', 'pendente', 'pendente_de_resposta'])
+  @IsEnum(['em_aberto', 'em_andamento', 'concluido', 'standby', 'cancelado'])
   status?: string;
 
   @IsOptional()
@@ -23,7 +34,7 @@ export class ListDemandasFiltersDto {
   protocolo?: string;
 
   @IsOptional()
-  @Type(() => Boolean)
+  @Transform(({ value }) => queryBoolean(value))
   @IsBoolean()
   prioridade?: boolean;
 
@@ -34,6 +45,11 @@ export class ListDemandasFiltersDto {
   @IsOptional()
   @IsUUID()
   responsavelPrincipalId?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => queryBoolean(value))
+  @IsBoolean()
+  responsavelApenasPrincipal?: boolean;
 
   @IsOptional()
   @IsArray()
@@ -47,6 +63,10 @@ export class ListDemandasFiltersDto {
   @IsOptional()
   @IsString()
   pesquisarTarefaOuObservacao?: string;
+
+  @IsOptional()
+  @IsString()
+  pesquisaGeral?: string;
 
   @IsOptional()
   @IsDateString()
@@ -63,4 +83,17 @@ export class ListDemandasFiltersDto {
   @IsOptional()
   @IsDateString()
   prazoAte?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  pageSize?: number;
 }

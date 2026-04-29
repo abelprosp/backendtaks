@@ -165,6 +165,7 @@ public sealed class ListDemandasFiltersQuery
     public bool? Prioridade { get; set; }
     public string? CriadorId { get; set; }
     public string? ResponsavelPrincipalId { get; set; }
+    public bool? ResponsavelApenasPrincipal { get; set; }
     public List<string>? SetorIds { get; set; }
     public string? CondicaoPrazo { get; set; }
     public string? PesquisarTarefaOuObservacao { get; set; }
@@ -175,4 +176,6 @@ public sealed class ListDemandasFiltersQuery
     public string? PrazoAte { get; set; }
     public int? Page { get; set; }
     public int? PageSize { get; set; }
+    public string? SortBy { get; set; }
+    public string? SortDirection { get; set; }
 }

@@ -23,6 +23,7 @@ const DEFAULT_OPTIONS = {
   limitDemands: null,
   demandBatchSize: 100,
   concurrency: 4,
+  skipAnexos: false,
   writeSnapshot: true,
 };
 
@@ -174,6 +175,10 @@ function parseArgs(argv) {
     }
     if (arg.startsWith('--concurrency=')) {
       options.concurrency = Math.max(1, Number.parseInt(arg.slice('--concurrency='.length), 10) || 1);
+      continue;
+    }
+    if (arg === '--skip-anexos') {
+      options.skipAnexos = true;
       continue;
     }
     if (arg === '--no-snapshot') {
@@ -506,11 +511,13 @@ function parseLegacyHistory(text) {
     .filter(Boolean);
   return lines.map((line) => {
     const dateTime = parseBrDateTime(line);
+    const dateOnly = !dateTime ? parseBrDate(line) : null;
+    const createdAt = dateTime || (dateOnly ? `${dateOnly}T00:00:00` : null);
     const withoutPrefix = dateTime ? line.replace(/^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(?::\d{2})?\s*-\s*/, '') : line;
     const userName = extractFirst('por:\\s*\\(\\d+\\)\\s*-\\s*([^\\-]+?)(?:\\s*-|$)', withoutPrefix, 'i');
     return {
       raw: line,
-      createdAt: dateTime,
+      createdAt,
       userName: normalizeWhitespace(userName || ''),
       description: withoutPrefix,
     };
@@ -1641,7 +1648,7 @@ function resolveSetorIds(reference, setorNames, warnings, entityLabel) {
   return [...new Set(resolved)];
 }
 
-async function buildEventRows(context, type, ownerId, history) {
+async function buildEventRows(context, type, ownerId, history, fallbackCreatedAt = null) {
   const rows = [];
   for (const item of history || []) {
     let userId = null;
@@ -1659,16 +1666,37 @@ async function buildEventRows(context, type, ownerId, history) {
       tipo: 'legado',
       descricao: item.raw,
       metadata: { imported: true },
-      created_at: item.createdAt ? item.createdAt.replace('T', ' ') : undefined,
+      created_at: (item.createdAt || fallbackCreatedAt) ? (item.createdAt || fallbackCreatedAt).replace('T', ' ') : undefined,
     });
   }
   return rows;
 }
 
+function normalizeRowsForInsert(rows) {
+  if (!rows.length) return rows;
+
+  const keys = new Set();
+  for (const row of rows) {
+    for (const key of Object.keys(row)) keys.add(key);
+  }
+
+  return rows.map((row) => {
+    const normalized = {};
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(row, key)) {
+        normalized[key] = row[key] === undefined ? null : row[key];
+      } else {
+        normalized[key] = null;
+      }
+    }
+    return normalized;
+  });
+}
+
 async function replaceCollection(supabase, table, filterQuery, rows) {
   await supabase.request(`${table}?${filterQuery}`, { method: 'DELETE' });
   if (!rows.length) return;
-  await supabase.insert(table, rows, { select: '*' });
+  await supabase.insert(table, normalizeRowsForInsert(rows), { select: '*' });
 }
 
 function getAnexosBucketName() {
@@ -1898,7 +1926,12 @@ async function importTemplates(context, templates) {
       ordem: item.ordem,
       responsavel_user_id: item.responsavel_user_id,
     })));
-    await replaceCollection(context.supabase, 'template_evento', `template_id=eq.${encodeEq(templateId)}`, await buildEventRows(context, 'template', templateId, template.history));
+    await replaceCollection(
+      context.supabase,
+      'template_evento',
+      `template_id=eq.${encodeEq(templateId)}`,
+      await buildEventRows(context, 'template', templateId, template.history, template.createdAt),
+    );
 
     context.map.templates[mapKey] = templateId;
     await saveMap(context.map);
@@ -1910,7 +1943,7 @@ function isFinalStatus(status) {
   return status === 'concluido' || status === 'cancelado';
 }
 
-async function importDemandas(context, demandas) {
+async function importDemandas(context, demandas, options = DEFAULT_OPTIONS) {
   for (const demanda of demandas) {
     console.log(`importando demanda ${demanda.legacyId} - ${demanda.protocolo}`);
     const mapKey = demanda.legacyId;
@@ -2027,7 +2060,12 @@ async function importDemandas(context, demandas) {
       responsavel_user_id: item.responsavel_user_id,
     })));
     await replaceCollection(context.supabase, 'observacao', `demanda_id=eq.${encodeEq(demandaId)}`, observacaoRows);
-    await replaceCollection(context.supabase, 'demanda_evento', `demanda_id=eq.${encodeEq(demandaId)}`, await buildEventRows(context, 'demanda', demandaId, demanda.history));
+    await replaceCollection(
+      context.supabase,
+      'demanda_evento',
+      `demanda_id=eq.${encodeEq(demandaId)}`,
+      await buildEventRows(context, 'demanda', demandaId, demanda.history, demanda.createdAt),
+    );
 
     if (isRecorrente && demanda.recorrenciaDataBase) {
       await replaceCollection(context.supabase, 'recorrencia_config', `demanda_id=eq.${encodeEq(demandaId)}`, [{
@@ -2038,7 +2076,9 @@ async function importDemandas(context, demandas) {
       }]);
     }
 
-    await syncDemandaAnexos(context, context.legacy, demanda, demandaId);
+    if (!options.skipAnexos) {
+      await syncDemandaAnexos(context, context.legacy, demanda, demandaId);
+    }
 
     context.map.demandas[mapKey] = demandaId;
     await saveMap(context.map);
@@ -2057,7 +2097,7 @@ async function importDemandasInBatches(legacy, context, pendingSummaries, option
     console.log('');
     console.log(`lote de demandas ${batchIndex + 1}/${batches.length} (${batch.length} itens)`);
     const details = await collectLegacyDemandDetails(legacy, batch, options, { offset, total });
-    await importDemandas(context, details);
+    await importDemandas(context, details, options);
   }
 }
 
@@ -2094,7 +2134,7 @@ async function main() {
     snapshot.users = await collectLegacyUsers(legacy, options);
   }
 
-  if (options.phases.has('clients') || options.phases.has('templates') || options.phases.has('demandas')) {
+  if (options.phases.has('clients')) {
     console.log('coletando clientes do legado...');
     snapshot.clients = await collectLegacyClients(legacy, options);
   }

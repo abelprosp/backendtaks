@@ -29,6 +29,7 @@ uploads/
 # Test / coverage
 coverage/
 .nyc_output/
+scripts/.legacy-cache/
 
 # TypeScript
 *.tsbuildinfo

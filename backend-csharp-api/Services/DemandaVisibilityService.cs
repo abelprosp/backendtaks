@@ -5,11 +5,6 @@ namespace LuxusDemandas.Api.Services;
 
 public sealed class DemandaVisibilityService
 {
-    private static readonly HashSet<string> PrivateDemandMasterEmails = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "rafael@luxustelefonia.com.br",
-        "redobrai@gmail.com",
-    };
     private readonly SupabaseRestService _supabase;
 
     public DemandaVisibilityService(SupabaseRestService supabase)
@@ -128,10 +123,7 @@ public sealed class DemandaVisibilityService
 
     public async Task<bool> CanManagePrivateDemandasAsync(string userId, CancellationToken cancellationToken)
     {
-        var user = await _supabase.FindUserByIdAsync(userId, cancellationToken);
-        return user is not null
-               && PrivateDemandMasterEmails.Contains(user.Email)
-               && await IsAdminAsync(userId, cancellationToken);
+        return await IsAdminAsync(userId, cancellationToken);
     }
 
     private async Task<IReadOnlyList<string>> FilterPrivateDemandIdsAsync(

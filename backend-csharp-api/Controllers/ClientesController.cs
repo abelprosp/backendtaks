@@ -1,5 +1,6 @@
 using LuxusDemandas.Api.Services;
 using LuxusDemandas.Api.Models;
+using LuxusDemandas.Api.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -57,6 +58,11 @@ public sealed class ClientesController : ControllerBase
     [HttpDelete("{id}")]
     public async Task<IActionResult> Remove(string id, CancellationToken cancellationToken)
     {
+        if (!User.HasRoleSlug("admin"))
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "Apenas usuários ADM podem excluir clientes." });
+        }
+
         try
         {
             return Ok(await _clientes.RemoveAsync(id, cancellationToken));

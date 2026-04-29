@@ -20,13 +20,23 @@ builder.Services.Configure<AppOptions>(options =>
     options.JwtRefreshSecret = builder.Configuration["JWT_REFRESH_SECRET"] ?? options.JwtSecret;
     options.JwtExpiresIn = builder.Configuration["JWT_EXPIRES_IN"] ?? "15m";
     options.RefreshExpiresIn = builder.Configuration["REFRESH_EXPIRES_IN"] ?? "7d";
+    options.PasswordAccessTokenExpiresIn = builder.Configuration["PASSWORD_ACCESS_TOKEN_EXPIRES_IN"] ?? "24h";
+    options.LegacyImportedPasswordHash = builder.Configuration["LEGACY_IMPORTED_PASSWORD_HASH"] ?? string.Empty;
     options.OpenAiApiKey = builder.Configuration["OPENAI_API_KEY"] ?? string.Empty;
     options.SupabaseStorageBucket = builder.Configuration["SUPABASE_STORAGE_BUCKET"] ?? "demandas-anexos";
+    options.SmtpHost = builder.Configuration["SMTP_HOST"] ?? string.Empty;
+    options.SmtpPort = int.TryParse(builder.Configuration["SMTP_PORT"], out var smtpPort) ? smtpPort : 587;
+    options.SmtpUsername = builder.Configuration["SMTP_USERNAME"] ?? string.Empty;
+    options.SmtpPassword = builder.Configuration["SMTP_PASSWORD"] ?? string.Empty;
+    options.SmtpFromEmail = builder.Configuration["SMTP_FROM_EMAIL"] ?? string.Empty;
+    options.SmtpFromName = builder.Configuration["SMTP_FROM_NAME"] ?? "Luxus Demandas";
+    options.SmtpUseSsl = !bool.TryParse(builder.Configuration["SMTP_USE_SSL"], out var smtpUseSsl) || smtpUseSsl;
     options.NodeEnv = builder.Configuration["NODE_ENV"] ?? "development";
 });
 
 builder.Services.AddHttpClient();
 builder.Services.AddHttpClient<SupabaseRestService>();
+builder.Services.AddScoped<EmailService>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<UsersService>();
 builder.Services.AddScoped<SetoresService>();
