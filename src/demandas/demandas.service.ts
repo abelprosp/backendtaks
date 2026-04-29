@@ -1870,6 +1870,11 @@ export class DemandasService {
       const clienteIds = new Set((data ?? []).map((d: any) => d.demanda_id));
       ids = ids.filter((id: string) => clienteIds.has(id));
     }
+    if (filters.ocultarStandby && filters.status !== 'standby') {
+      const { data } = await sb.from('Demanda').select('id').neq('status', 'standby');
+      const set = new Set((data ?? []).map((d: any) => d.id));
+      ids = ids.filter((id: string) => set.has(id));
+    }
     if (filters.responsavelPrincipalId) {
       let query = sb
         .from('demanda_responsavel')
@@ -1966,7 +1971,7 @@ export class DemandasService {
   }
 
   async list(userId: string, filters: ListDemandasFiltersDto) {
-    if (filters.responsavelPrincipalId) {
+    if (filters.responsavelPrincipalId || (filters.ocultarStandby && filters.status !== 'standby')) {
       const { ids, pesquisaEvidence } = await this.resolveFilteredIds(userId, filters, 'all');
       if (!ids.length) {
         return { data: [], total: 0 };
@@ -1975,6 +1980,7 @@ export class DemandasService {
         ...filters,
         responsavelPrincipalId: undefined,
         responsavelApenasPrincipal: undefined,
+        ocultarStandby: undefined,
       };
       const rpcResult = await this.listDemandasViaRpc(userId, filtersWithoutResponsavel, ids);
       if (rpcResult) return rpcResult;
@@ -2210,14 +2216,14 @@ export class DemandasService {
   }
 
   async exportExcel(userId: string, filters: ListDemandasFiltersDto) {
-    const needsPrefilter = filters.pesquisaGeral?.trim() || filters.responsavelPrincipalId;
+    const needsPrefilter = filters.pesquisaGeral?.trim() || filters.responsavelPrincipalId || (filters.ocultarStandby && filters.status !== 'standby');
     const prefilteredIds = needsPrefilter
       ? (await this.resolveFilteredIds(userId, filters, 'all')).ids
       : null;
     if (prefilteredIds && !prefilteredIds.length) return [];
 
     const rpcFilters = prefilteredIds && filters.responsavelPrincipalId
-      ? { ...filters, responsavelPrincipalId: undefined, responsavelApenasPrincipal: undefined }
+      ? { ...filters, responsavelPrincipalId: undefined, responsavelApenasPrincipal: undefined, ocultarStandby: undefined }
       : filters;
 
     const rpcResult = await this.listDemandasViaRpc(
@@ -2277,6 +2283,7 @@ export class DemandasService {
     append('clienteId', filters.clienteId);
     append('assunto', filters.assunto);
     append('status', filters.status);
+    append('ocultarStandby', filters.ocultarStandby);
     append('tipoRecorrencia', filters.tipoRecorrencia);
     append('protocolo', filters.protocolo);
     append('prioridade', filters.prioridade);

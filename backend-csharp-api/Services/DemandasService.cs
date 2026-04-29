@@ -191,6 +191,19 @@ public sealed class DemandasService
             return new { data = Array.Empty<object>(), total = 0 };
         }
 
+        if (filters.OcultarStandby == true && !string.Equals(filters.Status, "standby", StringComparison.Ordinal))
+        {
+            var activeRows = await _supabase.QueryAllRowsAsync(
+                "Demanda?select=id&status=neq.standby",
+                cancellationToken);
+            var activeIds = activeRows.Select(row => row.GetStringOrEmpty("id")).Where(id => !string.IsNullOrWhiteSpace(id)).ToHashSet(StringComparer.Ordinal);
+            visibleIds = visibleIds.Where(activeIds.Contains).ToList();
+            if (visibleIds.Count == 0)
+            {
+                return new { data = Array.Empty<object>(), total = 0 };
+            }
+        }
+
         if (!string.IsNullOrWhiteSpace(filters.ResponsavelPrincipalId))
         {
             var principalFilter = filters.ResponsavelApenasPrincipal == true ? "&is_principal=eq.true" : string.Empty;
@@ -657,6 +670,7 @@ public sealed class DemandasService
             ClienteId = filters.ClienteId,
             Assunto = filters.Assunto,
             Status = filters.Status,
+            OcultarStandby = filters.OcultarStandby,
             TipoRecorrencia = filters.TipoRecorrencia,
             Protocolo = filters.Protocolo,
             Prioridade = filters.Prioridade,
@@ -1449,6 +1463,7 @@ public sealed class DemandasService
         Add("clienteId", filters.ClienteId);
         Add("assunto", filters.Assunto);
         Add("status", filters.Status);
+        if (filters.OcultarStandby.HasValue) Add("ocultarStandby", filters.OcultarStandby.Value ? "true" : "false");
         Add("tipoRecorrencia", filters.TipoRecorrencia);
         Add("protocolo", filters.Protocolo);
         if (filters.Prioridade.HasValue) Add("prioridade", filters.Prioridade.Value ? "true" : "false");
@@ -2748,6 +2763,13 @@ public sealed class DemandasService
 
         if (!string.IsNullOrWhiteSpace(filters.Status)
             && !string.Equals(row.GetStringOrEmpty("status"), filters.Status, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (filters.OcultarStandby == true
+            && !string.Equals(filters.Status, "standby", StringComparison.Ordinal)
+            && string.Equals(row.GetStringOrEmpty("status"), "standby", StringComparison.Ordinal))
         {
             return false;
         }

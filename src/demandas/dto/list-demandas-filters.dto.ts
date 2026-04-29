@@ -26,6 +26,11 @@ export class ListDemandasFiltersDto {
   status?: string;
 
   @IsOptional()
+  @Transform(({ value }) => queryBoolean(value))
+  @IsBoolean()
+  ocultarStandby?: boolean;
+
+  @IsOptional()
   @IsEnum(['diaria', 'semanal', 'quinzenal', 'mensal'])
   tipoRecorrencia?: string;
 

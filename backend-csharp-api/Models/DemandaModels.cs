@@ -160,6 +160,7 @@ public sealed class ListDemandasFiltersQuery
     public string? ClienteId { get; set; }
     public string? Assunto { get; set; }
     public string? Status { get; set; }
+    public bool? OcultarStandby { get; set; }
     public string? TipoRecorrencia { get; set; }
     public string? Protocolo { get; set; }
     public bool? Prioridade { get; set; }
