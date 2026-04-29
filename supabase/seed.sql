@@ -1,5 +1,5 @@
 -- ============================================================
--- Luxus Tasks - Dados iniciais (opcional)
+-- LUXUS DEMANDAS - Dados iniciais (opcional)
 -- Execute depois do schema.sql. Insere setores e perfis (roles).
 -- ============================================================
 
