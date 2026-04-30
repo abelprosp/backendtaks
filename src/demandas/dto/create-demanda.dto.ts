@@ -43,6 +43,15 @@ export class CreateDemandaDto {
 
   @IsOptional()
   @IsBoolean()
+  isPrivada?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  privateViewerIds?: string[];
+
+  @IsOptional()
+  @IsBoolean()
   isRecorrente?: boolean;
 
   @IsOptional()

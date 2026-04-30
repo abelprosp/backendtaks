@@ -966,6 +966,8 @@ export class DemandasService {
         status,
         criador_id: userId,
         observacoes_gerais: dto.observacoesGerais ?? null,
+        is_privada: dto.isPrivada ?? false,
+        private_owner_user_id: dto.isPrivada ? userId : null,
         is_recorrente: dto.isRecorrente ?? false,
       })
       .select()
@@ -974,6 +976,9 @@ export class DemandasService {
     if (dto.setores?.length) await sb.from('demanda_setor').insert(dto.setores.map((setorId) => ({ demanda_id: demanda.id, setor_id: setorId })));
     if (dto.clienteIds?.length) await sb.from('demanda_cliente').insert(dto.clienteIds.map((clienteId) => ({ demanda_id: demanda.id, cliente_id: clienteId })));
     if (dto.responsaveis?.length) await sb.from('demanda_responsavel').insert(dto.responsaveis.map((r) => ({ demanda_id: demanda.id, user_id: r.userId, is_principal: r.isPrincipal ?? false })));
+    if (dto.privateViewerIds?.length) {
+      await sb.from('demanda_private_viewer').insert([...new Set(dto.privateViewerIds)].map((viewerId) => ({ demanda_id: demanda.id, user_id: viewerId })));
+    }
     if (dto.subtarefas?.length) {
       await sb.from('subtarefa').insert(
         dto.subtarefas.map((t, i) => ({
@@ -1026,6 +1031,8 @@ export class DemandasService {
         status: 'em_aberto',
         criador_id: userId,
         observacoes_gerais: observacoesGerais ?? null,
+        is_privada: dto.isPrivada ?? false,
+        private_owner_user_id: dto.isPrivada ? userId : null,
         is_recorrente: isRecorrente,
       })
       .select()
@@ -1035,6 +1042,9 @@ export class DemandasService {
     if (setorIds.length) await sb.from('demanda_setor').insert(setorIds.map((setorId: string) => ({ demanda_id: demanda.id, setor_id: setorId })));
     if (dto.clienteIds?.length) await sb.from('demanda_cliente').insert(dto.clienteIds.map((clienteId) => ({ demanda_id: demanda.id, cliente_id: clienteId })));
     if (responsaveisDto.length) await sb.from('demanda_responsavel').insert(responsaveisDto.map((r: any) => ({ demanda_id: demanda.id, user_id: r.userId, is_principal: r.isPrincipal ?? false })));
+    if (dto.privateViewerIds?.length) {
+      await sb.from('demanda_private_viewer').insert([...new Set(dto.privateViewerIds)].map((viewerId) => ({ demanda_id: demanda.id, user_id: viewerId })));
+    }
     if (subtarefasTemplate.length) {
       await sb.from('subtarefa').insert(
         subtarefasTemplate.map((t: any, i: number) => ({
@@ -2057,6 +2067,10 @@ export class DemandasService {
       else upd.resolvido_em = null;
     }
     if (dto.observacoesGerais !== undefined) upd.observacoes_gerais = dto.observacoesGerais;
+    if (dto.isPrivada !== undefined) {
+      upd.is_privada = dto.isPrivada;
+      upd.private_owner_user_id = dto.isPrivada ? userId : null;
+    }
     if (dto.isRecorrente !== undefined) upd.is_recorrente = dto.isRecorrente;
     if (Object.keys(upd).length) await sb.from('Demanda').update(upd).eq('id', id);
 
@@ -2071,6 +2085,10 @@ export class DemandasService {
     if (dto.responsaveis) {
       await sb.from('demanda_responsavel').delete().eq('demanda_id', id);
       if (dto.responsaveis.length) await sb.from('demanda_responsavel').insert(dto.responsaveis.map((r) => ({ demanda_id: id, user_id: r.userId, is_principal: r.isPrincipal ?? false })));
+    }
+    if (dto.privateViewerIds) {
+      await sb.from('demanda_private_viewer').delete().eq('demanda_id', id);
+      if (dto.privateViewerIds.length) await sb.from('demanda_private_viewer').insert([...new Set(dto.privateViewerIds)].map((viewerId) => ({ demanda_id: id, user_id: viewerId })));
     }
     if (dto.subtarefas) {
       await sb.from('subtarefa').delete().eq('demanda_id', id);
@@ -2350,7 +2368,7 @@ export class DemandasService {
       normalizedQuery.includes('criado por');
     const responsavelContextHint =
       normalizedQuery.includes('responsavel') ||
-      normalizedQuery.includes('responsÃ¡vel') ||
+      normalizedQuery.includes('responsável') ||
       normalizedQuery.includes('da vez');
 
     if (normalizedQuery.includes('standby') || normalizedQuery.includes('stand by')) filters.status = 'standby';

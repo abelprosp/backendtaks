@@ -1,5 +1,8 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using BCrypt.Net;
 using LuxusDemandas.Api.Configuration;
 using LuxusDemandas.Api.Models;
@@ -192,6 +195,46 @@ public sealed class AuthService
         return new AuthUser(refreshedUser.Id, refreshedUser.Email, refreshedUser.Name, refreshedUser.Roles);
     }
 
+    public async Task<object> GeneratePasswordAccessLinkAsync(string targetUserId, string actorUserId, CancellationToken cancellationToken)
+    {
+        _ = actorUserId;
+        var user = await _supabase.FindUserByIdAsync(targetUserId, cancellationToken);
+        if (user is null)
+        {
+            throw new KeyNotFoundException("Usuário não encontrado.");
+        }
+        if (!user.Active)
+        {
+            throw new InvalidOperationException("Usuário inativo.");
+        }
+
+        var purpose = user.NeedsPasswordSetup ? "first_access" : "reset_password";
+        var expiresAt = DateTimeOffset.UtcNow.Add(ParseDuration(_options.PasswordAccessTokenExpiresIn));
+        var payload = new Dictionary<string, object?>
+        {
+            ["sub"] = user.Id,
+            ["email"] = user.Email,
+            ["purpose"] = purpose,
+            ["exp"] = expiresAt.ToUnixTimeSeconds(),
+            ["ph"] = FingerprintPasswordHash(user.PasswordHash),
+        };
+        var encodedPayload = Base64UrlEncode(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload)));
+        var token = $"{encodedPayload}.{SignPasswordAccessPayload(encodedPayload)}";
+        var baseUrl = (_options.FrontendUrl.Length > 0 ? _options.FrontendUrl : _options.FrontendOrigin).Trim().TrimEnd('/');
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            baseUrl = "https://luxustasks-omega.vercel.app";
+        }
+
+        return new
+        {
+            url = $"{baseUrl}/login/redefinir-senha?token={Uri.EscapeDataString(token)}",
+            expiresAt = expiresAt.UtcDateTime.ToString("O"),
+            purpose,
+            deliveryMethod = "manual",
+        };
+    }
+
     public static AuthUser MapAuthenticatedUser(ClaimsPrincipal principal)
     {
         var roles = principal.FindAll("role_slug")
@@ -248,6 +291,29 @@ public sealed class AuthService
 
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
+
+    private string SignPasswordAccessPayload(string encodedPayload)
+    {
+        var secret = !string.IsNullOrWhiteSpace(_options.JwtSecret)
+            ? _options.JwtSecret
+            : (!string.IsNullOrWhiteSpace(_options.SupabaseServiceRoleKey)
+                ? _options.SupabaseServiceRoleKey
+                : "luxus-password-access-fallback");
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+        return Base64UrlEncode(hmac.ComputeHash(Encoding.UTF8.GetBytes(encodedPayload)));
+    }
+
+    private static string FingerprintPasswordHash(string? passwordHash)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(passwordHash ?? string.Empty));
+        return Convert.ToHexString(bytes).ToLowerInvariant()[..24];
+    }
+
+    private static string Base64UrlEncode(byte[] bytes) =>
+        Convert.ToBase64String(bytes)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
 
     private static TimeSpan ParseDuration(string raw)
     {

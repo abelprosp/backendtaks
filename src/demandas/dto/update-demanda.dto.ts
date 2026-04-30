@@ -23,6 +23,15 @@ export class UpdateDemandaDto {
   observacoesGerais?: string;
 
   @IsOptional()
+  @IsBoolean()
+  isPrivada?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  privateViewerIds?: string[];
+
+  @IsOptional()
   setores?: string[];
 
   @IsOptional()

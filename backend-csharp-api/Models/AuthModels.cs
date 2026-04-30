@@ -31,6 +31,7 @@ public sealed record TokenUser(
     string Name,
     bool Active,
     string PasswordHash,
+    bool NeedsPasswordSetup,
     IReadOnlyList<RoleLink> Roles);
 
 public sealed record TokenResponse(
@@ -77,4 +78,4 @@ public sealed record ClienteDto(
 
 public sealed record UserDropdownDto(string Id, string Name, string Email);
 
-public sealed record UserListDto(string Id, string Name, string Email, bool Active, string? CreatedAt, IReadOnlyList<RoleDto> Roles);
+public sealed record UserListDto(string Id, string Name, string Email, bool Active, string? CreatedAt, IReadOnlyList<RoleDto> Roles, bool NeedsPasswordSetup);

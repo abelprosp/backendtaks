@@ -15,11 +15,12 @@ public sealed class DemandaVisibilityService
     public async Task<IReadOnlyList<string>> VisibleDemandaIdsAsync(string userId, CancellationToken cancellationToken)
     {
         var canViewAllPrivateDemandas = await CanManagePrivateDemandasAsync(userId, cancellationToken);
+        var privateViewerIds = await LoadPrivateViewerDemandIdsAsync(userId, cancellationToken);
         if (await IsAdminAsync(userId, cancellationToken))
         {
             var allRows = await _supabase.QueryAllRowsAsync("Demanda?select=id,is_privada,private_owner_user_id", cancellationToken);
             return allRows
-                .Where(row => IsDemandVisibleToUser(row, userId, canViewAllPrivateDemandas))
+                .Where(row => IsDemandVisibleToUser(row, userId, canViewAllPrivateDemandas, privateViewerIds))
                 .Select(row => row.GetStringOrEmpty("id"))
                 .Where(id => !string.IsNullOrWhiteSpace(id))
                 .Distinct()
@@ -51,6 +52,7 @@ public sealed class DemandaVisibilityService
                 ids.Add(demandaId);
             }
         }
+        ids.UnionWith(privateViewerIds);
 
         var setorIds = bySetorTask.Result
             .Select(row => row.GetStringOrEmpty("setor_id"))
@@ -72,7 +74,7 @@ public sealed class DemandaVisibilityService
             }
         }
 
-        return await FilterPrivateDemandIdsAsync(userId, ids, canViewAllPrivateDemandas, cancellationToken);
+        return await FilterPrivateDemandIdsAsync(userId, ids, canViewAllPrivateDemandas, privateViewerIds, cancellationToken);
     }
 
     public async Task<bool> CanViewDemandaAsync(string userId, string demandaId, CancellationToken cancellationToken)
@@ -86,7 +88,8 @@ public sealed class DemandaVisibilityService
         }
 
         var canViewAllPrivateDemandas = await CanManagePrivateDemandasAsync(userId, cancellationToken);
-        if (!IsDemandVisibleToUser(demanda.Value, userId, canViewAllPrivateDemandas))
+        var privateViewerIds = await LoadPrivateViewerDemandIdsAsync(userId, cancellationToken);
+        if (!IsDemandVisibleToUser(demanda.Value, userId, canViewAllPrivateDemandas, privateViewerIds))
         {
             return false;
         }
@@ -130,6 +133,7 @@ public sealed class DemandaVisibilityService
         string userId,
         IEnumerable<string> ids,
         bool canViewAllPrivateDemandas,
+        ISet<string> privateViewerIds,
         CancellationToken cancellationToken)
     {
         var idList = ids
@@ -146,14 +150,40 @@ public sealed class DemandaVisibilityService
             cancellationToken);
 
         return rows
-            .Where(row => IsDemandVisibleToUser(row, userId, canViewAllPrivateDemandas))
+            .Where(row => IsDemandVisibleToUser(row, userId, canViewAllPrivateDemandas, privateViewerIds))
             .Select(row => row.GetStringOrEmpty("id"))
             .Where(id => !string.IsNullOrWhiteSpace(id))
             .Distinct()
             .ToArray();
     }
 
-    private static bool IsDemandVisibleToUser(JsonElement row, string userId, bool canViewAllPrivateDemandas)
+    private async Task<HashSet<string>> LoadPrivateViewerDemandIdsAsync(string userId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var rows = await _supabase.QueryAllRowsAsync(
+                $"demanda_private_viewer?select=demanda_id&user_id=eq.{Uri.EscapeDataString(userId)}",
+                cancellationToken);
+            return rows
+                .Select(row => row.GetStringOrEmpty("demanda_id"))
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .ToHashSet(StringComparer.Ordinal);
+        }
+        catch (InvalidOperationException error) when (IsMissingPrivateViewerTable(error))
+        {
+            return [];
+        }
+    }
+
+    private static bool IsMissingPrivateViewerTable(Exception error)
+    {
+        var message = error.Message;
+        return message.Contains("demanda_private_viewer", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("PGRST205", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("42P01", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsDemandVisibleToUser(JsonElement row, string userId, bool canViewAllPrivateDemandas, ISet<string> privateViewerIds)
     {
         if (!row.GetBooleanOrDefault("is_privada"))
         {
@@ -161,6 +191,11 @@ public sealed class DemandaVisibilityService
         }
 
         if (canViewAllPrivateDemandas)
+        {
+            return true;
+        }
+
+        if (privateViewerIds.Contains(row.GetStringOrEmpty("id")))
         {
             return true;
         }

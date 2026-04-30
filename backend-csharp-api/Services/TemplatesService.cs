@@ -192,7 +192,7 @@ public sealed class TemplatesService
         try
         {
             var rows = await _supabase.RpcAsync<JsonElement[]>("rpc_templates_list", new { }, cancellationToken);
-            return rows.Select(MapTemplateFromRpcRow).ToList();
+            return rows.Select(row => MapTemplateFromRpcRow(row)).ToList();
         }
         catch
         {

@@ -72,6 +72,7 @@ public sealed class DemandasService
                 Concluida = false,
             }).ToList(),
             cancellationToken);
+        await ReplacePrivateViewersAsync(demandaId, request.PrivateViewerIds, cancellationToken);
 
         if (request.IsRecorrente == true && request.Recorrencia is not null)
         {
@@ -152,6 +153,7 @@ public sealed class DemandasService
                 Concluida = false,
             }).ToList(),
             cancellationToken);
+        await ReplacePrivateViewersAsync(demandaId, request.PrivateViewerIds, cancellationToken);
 
         if (isRecorrente && !string.IsNullOrWhiteSpace(recorrenciaDataBase) && !string.IsNullOrWhiteSpace(template.RecorrenciaTipo))
         {
@@ -475,6 +477,11 @@ public sealed class DemandasService
         if (request.Setores is not null || request.ClienteIds is not null || request.Responsaveis is not null || request.Subtarefas is not null)
         {
             await ReplaceDemandaRelationsAsync(id, request.Setores, request.ClienteIds, request.Responsaveis, request.Subtarefas, cancellationToken);
+        }
+
+        if (request.PrivateViewerIds is not null)
+        {
+            await ReplacePrivateViewersAsync(id, request.PrivateViewerIds, cancellationToken);
         }
 
         if (request.Recorrencia is not null)
@@ -1977,6 +1984,44 @@ public sealed class DemandasService
         }
     }
 
+    private async Task ReplacePrivateViewersAsync(
+        string demandaId,
+        IReadOnlyList<string>? viewerIds,
+        CancellationToken cancellationToken)
+    {
+        if (viewerIds is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _supabase.DeleteAsync("demanda_private_viewer", $"demanda_id=eq.{Uri.EscapeDataString(demandaId)}", cancellationToken);
+            var uniqueIds = viewerIds
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            if (uniqueIds.Length > 0)
+            {
+                await _supabase.InsertManyAsync(
+                    "demanda_private_viewer",
+                    uniqueIds.Select(userId => new { demanda_id = demandaId, user_id = userId }),
+                    cancellationToken);
+            }
+        }
+        catch (InvalidOperationException error) when (IsMissingPrivateViewerTable(error))
+        {
+        }
+    }
+
+    private static bool IsMissingPrivateViewerTable(Exception error)
+    {
+        var message = error.Message;
+        return message.Contains("demanda_private_viewer", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("PGRST205", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("42P01", StringComparison.OrdinalIgnoreCase);
+    }
+
     private object MapDemandaListFromRpc(JsonElement row)
     {
         var criador = row.GetOptionalProperty("criador");
@@ -2057,7 +2102,8 @@ public sealed class DemandasService
         var anexosTask = LoadAnexosAsync(demandaId, cancellationToken);
         var recorrenciaTask = LoadRecorrenciaAsync(demandaId, cancellationToken);
         var historicoTask = _audit.LoadDemandaEventsAsync(demandaId, cancellationToken);
-        await Task.WhenAll(subtarefasTask, observacoesTask, anexosTask, recorrenciaTask, historicoTask);
+        var privateViewersTask = LoadPrivateViewersAsync(demandaId, cancellationToken);
+        await Task.WhenAll(subtarefasTask, observacoesTask, anexosTask, recorrenciaTask, historicoTask, privateViewersTask);
 
         var recurring = recorrenciaTask.Result;
 
@@ -2095,6 +2141,7 @@ public sealed class DemandasService
             observacoes = observacoesTask.Result,
             anexos = anexosTask.Result,
             historico = historicoTask.Result,
+            privateViewers = privateViewersTask.Result,
             recorrenciaConfig = recurring is JsonElement recurringValue && recurringValue.ValueKind == JsonValueKind.Object
                 ? new
                 {
@@ -2299,6 +2346,54 @@ public sealed class DemandasService
                     : null,
             };
         }).ToList();
+    }
+
+    private async Task<IReadOnlyList<object>> LoadPrivateViewersAsync(string demandaId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var rows = await _supabase.QueryRowsAsync(
+                $"demanda_private_viewer?select=user_id&demanda_id=eq.{Uri.EscapeDataString(demandaId)}",
+                cancellationToken);
+            var userIds = rows
+                .Select(row => row.GetStringOrEmpty("user_id"))
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            if (userIds.Length == 0)
+            {
+                return Array.Empty<object>();
+            }
+
+            var users = await _supabase.QueryRowsAsync(
+                $"User?select=id,name,email&id=in.({string.Join(",", userIds.Select(Uri.EscapeDataString))})",
+                cancellationToken);
+            var usersById = users.ToDictionary(user => user.GetStringOrEmpty("id"));
+            return userIds.Select(userId =>
+            {
+                usersById.TryGetValue(userId, out var user);
+                return (object)new
+                {
+                    user = user.ValueKind == JsonValueKind.Object
+                        ? new
+                        {
+                            id = user.GetStringOrEmpty("id"),
+                            name = user.GetStringOrEmpty("name"),
+                            email = user.GetStringOrEmpty("email"),
+                        }
+                        : new
+                        {
+                            id = userId,
+                            name = string.Empty,
+                            email = string.Empty,
+                        },
+                };
+            }).ToList();
+        }
+        catch (InvalidOperationException error) when (IsMissingPrivateViewerTable(error))
+        {
+            return Array.Empty<object>();
+        }
     }
 
     private async Task<IReadOnlyList<object>> LoadSetoresAsync(string demandaId, CancellationToken cancellationToken)
