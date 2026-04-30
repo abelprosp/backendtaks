@@ -42,7 +42,15 @@ public sealed class SupabaseRestService
     public async Task<TokenUser?> FindUserByEmailAsync(string email, CancellationToken cancellationToken)
     {
         var normalizedEmail = email.ToLowerInvariant().Trim();
-        var rows = await GetAsync<JsonElement[]>($"User?select=id,email,password_hash,name,active,needs_password_setup&email=eq.{Uri.EscapeDataString(normalizedEmail)}&limit=1", cancellationToken);
+        JsonElement[] rows;
+        try
+        {
+            rows = await GetAsync<JsonElement[]>($"User?select=id,email,password_hash,name,active,needs_password_setup&email=eq.{Uri.EscapeDataString(normalizedEmail)}&limit=1", cancellationToken);
+        }
+        catch (InvalidOperationException error) when (IsMissingNeedsPasswordSetupColumn(error))
+        {
+            rows = await GetAsync<JsonElement[]>($"User?select=id,email,password_hash,name,active&email=eq.{Uri.EscapeDataString(normalizedEmail)}&limit=1", cancellationToken);
+        }
         var row = rows.FirstOrDefault();
         if (row.ValueKind == JsonValueKind.Undefined)
         {
@@ -54,7 +62,15 @@ public sealed class SupabaseRestService
 
     public async Task<TokenUser?> FindUserByIdAsync(string id, CancellationToken cancellationToken)
     {
-        var rows = await GetAsync<JsonElement[]>($"User?select=id,email,password_hash,name,active,needs_password_setup&id=eq.{Uri.EscapeDataString(id)}&limit=1", cancellationToken);
+        JsonElement[] rows;
+        try
+        {
+            rows = await GetAsync<JsonElement[]>($"User?select=id,email,password_hash,name,active,needs_password_setup&id=eq.{Uri.EscapeDataString(id)}&limit=1", cancellationToken);
+        }
+        catch (InvalidOperationException error) when (IsMissingNeedsPasswordSetupColumn(error))
+        {
+            rows = await GetAsync<JsonElement[]>($"User?select=id,email,password_hash,name,active&id=eq.{Uri.EscapeDataString(id)}&limit=1", cancellationToken);
+        }
         var row = rows.FirstOrDefault();
         if (row.ValueKind == JsonValueKind.Undefined)
         {
@@ -88,7 +104,15 @@ public sealed class SupabaseRestService
 
     public async Task<IReadOnlyList<UserListDto>> ListAllUsersAsync(CancellationToken cancellationToken)
     {
-        var users = await QueryAllRowsAsync("User?select=id,name,email,active,created_at,password_hash,needs_password_setup&order=name.asc", cancellationToken);
+        JsonElement[] users;
+        try
+        {
+            users = await QueryAllRowsAsync("User?select=id,name,email,active,created_at,password_hash,needs_password_setup&order=name.asc", cancellationToken);
+        }
+        catch (InvalidOperationException error) when (IsMissingNeedsPasswordSetupColumn(error))
+        {
+            users = await QueryAllRowsAsync("User?select=id,name,email,active,created_at,password_hash&order=name.asc", cancellationToken);
+        }
         var roleLinks = await QueryAllRowsAsync("user_role?select=user_id,role_id", cancellationToken);
         var roles = await ListRolesAsync(cancellationToken);
         var roleMap = roles.ToDictionary(role => role.Id, role => role);
@@ -424,6 +448,14 @@ public sealed class SupabaseRestService
             .Split('/', StringSplitOptions.RemoveEmptyEntries)
             .Select(Uri.EscapeDataString);
         return $"{Uri.EscapeDataString(bucketName)}/{string.Join("/", objectSegments)}";
+    }
+
+    private static bool IsMissingNeedsPasswordSetupColumn(Exception error)
+    {
+        var message = error.Message;
+        return message.Contains("needs_password_setup", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("PGRST204", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("42703", StringComparison.OrdinalIgnoreCase);
     }
 
     private static JsonElement ExtractSingleRow(JsonElement element)
