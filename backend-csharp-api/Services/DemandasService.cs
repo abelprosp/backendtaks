@@ -223,6 +223,12 @@ public sealed class DemandasService
             }
         }
 
+        visibleIds = await ApplyAnexosFilterAsync(visibleIds, filters.Anexos, cancellationToken);
+        if (visibleIds.Count == 0)
+        {
+            return new { data = Array.Empty<object>(), total = 0 };
+        }
+
         try
         {
             var rows = await _supabase.RpcAsync<JsonElement[]>("rpc_list_demandas_page", new
@@ -291,6 +297,7 @@ public sealed class DemandasService
         {
             throw new UnauthorizedAccessException("Sem permissao para ver esta demanda");
         }
+        await EnsureLegacyAnexosLinkedAsync(demanda.Value, id, cancellationToken);
         try
         {
             var rows = await _supabase.RpcAsync<JsonElement[]>("rpc_demanda_detail_for_user", new
@@ -385,6 +392,10 @@ public sealed class DemandasService
             pesquisaGeralIds = await BuildAdminPesquisaGeralIdsAsync(filters.PesquisaGeral, cancellationToken);
         }
 
+        HashSet<string>? anexoIds = IsAnexoFilter(filters.Anexos)
+            ? await LoadIdsAsync("anexo?select=demanda_id&limit=100000", "demanda_id", cancellationToken)
+            : null;
+
         var filtered = rows
             .Where(row =>
             {
@@ -404,6 +415,11 @@ public sealed class DemandasService
             .Where(row =>
             {
                 var demandaId = row.GetStringOrEmpty("id");
+                if (!MatchesAnexosFilter(demandaId, filters.Anexos, anexoIds))
+                {
+                    return false;
+                }
+
                 if (constrainedIds is not null && !constrainedIds.Contains(demandaId))
                 {
                     return false;
@@ -2642,6 +2658,63 @@ public sealed class DemandasService
         return rows.Select(row => (object)row.Clone()).ToList();
     }
 
+    private async Task EnsureLegacyAnexosLinkedAsync(JsonElement demanda, string demandaId, CancellationToken cancellationToken)
+    {
+        if (!_legacyAttachments.IsConfigured)
+        {
+            return;
+        }
+
+        var existing = await _supabase.QueryRowsAsync(
+            $"anexo?select=id&demanda_id=eq.{Uri.EscapeDataString(demandaId)}&limit=1",
+            cancellationToken);
+        if (existing.Length > 0)
+        {
+            return;
+        }
+
+        var legacyDemandaId = await ResolveLegacyDemandaIdAsync(demanda, demandaId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(legacyDemandaId))
+        {
+            return;
+        }
+
+        IReadOnlyList<LegacyAttachmentMetadata> legacyAnexos;
+        try
+        {
+            legacyAnexos = await _legacyAttachments.ListAsync(legacyDemandaId, cancellationToken);
+        }
+        catch
+        {
+            return;
+        }
+
+        foreach (var item in legacyAnexos)
+        {
+            if (string.IsNullOrWhiteSpace(item.StoragePath))
+            {
+                continue;
+            }
+
+            var duplicate = await _supabase.QueryRowsAsync(
+                $"anexo?select=id&storage_path=eq.{Uri.EscapeDataString(item.StoragePath)}&limit=1",
+                cancellationToken);
+            if (duplicate.Length > 0)
+            {
+                continue;
+            }
+
+            await _supabase.InsertSingleAsync("anexo", new
+            {
+                demanda_id = demandaId,
+                filename = string.IsNullOrWhiteSpace(item.Filename) ? "Anexo legado" : item.Filename,
+                mime_type = GuessMimeType(item.Filename),
+                size = 0,
+                storage_path = item.StoragePath,
+            }, cancellationToken);
+        }
+    }
+
     private async Task<string?> ResolveLegacyDemandaIdAsync(JsonElement demanda, string demandaId, CancellationToken cancellationToken)
     {
         var legacyId = demanda.GetNullableString("legacy_id");
@@ -2971,6 +3044,37 @@ public sealed class DemandasService
 
         current.IntersectWith(next);
         return current;
+    }
+
+    private async Task<List<string>> ApplyAnexosFilterAsync(
+        IReadOnlyList<string> ids,
+        string? filtro,
+        CancellationToken cancellationToken)
+    {
+        if (!IsAnexoFilter(filtro))
+        {
+            return ids.ToList();
+        }
+
+        var idsComAnexo = await LoadIdsAsync("anexo?select=demanda_id&limit=100000", "demanda_id", cancellationToken);
+        return ids
+            .Where(id => MatchesAnexosFilter(id, filtro, idsComAnexo))
+            .ToList();
+    }
+
+    private static bool IsAnexoFilter(string? filtro) =>
+        string.Equals(filtro, "com", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(filtro, "sem", StringComparison.OrdinalIgnoreCase);
+
+    private static bool MatchesAnexosFilter(string demandaId, string? filtro, HashSet<string>? idsComAnexo)
+    {
+        if (!IsAnexoFilter(filtro))
+        {
+            return true;
+        }
+
+        var hasAnexo = idsComAnexo?.Contains(demandaId) ?? false;
+        return string.Equals(filtro, "com", StringComparison.OrdinalIgnoreCase) ? hasAnexo : !hasAnexo;
     }
 
     private static bool MatchesAdminBaseFilters(JsonElement row, ListDemandasFiltersQuery filters)

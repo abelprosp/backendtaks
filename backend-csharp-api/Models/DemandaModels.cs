@@ -177,6 +177,7 @@ public sealed class ListDemandasFiltersQuery
     public string? CondicaoPrazo { get; set; }
     public string? PesquisarTarefaOuObservacao { get; set; }
     public string? PesquisaGeral { get; set; }
+    public string? Anexos { get; set; }
     public string? DataCriacaoDe { get; set; }
     public string? DataCriacaoAte { get; set; }
     public string? PrazoDe { get; set; }

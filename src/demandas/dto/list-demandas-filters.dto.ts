@@ -74,6 +74,10 @@ export class ListDemandasFiltersDto {
   pesquisaGeral?: string;
 
   @IsOptional()
+  @IsEnum(['com', 'sem'])
+  anexos?: 'com' | 'sem';
+
+  @IsOptional()
   @IsDateString()
   dataCriacaoDe?: string;
 

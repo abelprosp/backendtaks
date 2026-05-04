@@ -1931,6 +1931,11 @@ export class DemandasService {
       const set = new Set([...(sub.data ?? []).map((d: any) => d.demanda_id), ...(obs.data ?? []).map((d: any) => d.demanda_id)]);
       ids = ids.filter((id: string) => set.has(id));
     }
+    if (filters.anexos === 'com' || filters.anexos === 'sem') {
+      const { data } = await sb.from('anexo').select('demanda_id');
+      const set = new Set((data ?? []).map((d: any) => d.demanda_id));
+      ids = ids.filter((id: string) => (filters.anexos === 'com' ? set.has(id) : !set.has(id)));
+    }
     if (filters.pesquisaGeral?.trim()) {
       const evidence = await this.pesquisarEvidenciasPorCampo(ids, filters.pesquisaGeral.trim(), pesquisaMode);
       const set = new Set(evidence.matchedIds);
@@ -1996,7 +2001,7 @@ export class DemandasService {
   }
 
   async list(userId: string, filters: ListDemandasFiltersDto) {
-    if (filters.responsavelPrincipalId || (filters.ocultarStandby && filters.status !== 'standby')) {
+    if (filters.responsavelPrincipalId || (filters.ocultarStandby && filters.status !== 'standby') || filters.anexos) {
       const { ids, pesquisaEvidence } = await this.resolveFilteredIds(userId, filters, 'all');
       if (!ids.length) {
         return { data: [], total: 0 };
@@ -2006,6 +2011,7 @@ export class DemandasService {
         responsavelPrincipalId: undefined,
         responsavelApenasPrincipal: undefined,
         ocultarStandby: undefined,
+        anexos: undefined,
       };
       const rpcResult = await this.listDemandasViaRpc(userId, filtersWithoutResponsavel, ids);
       if (rpcResult) return rpcResult;
@@ -2038,14 +2044,16 @@ export class DemandasService {
   }
 
   async findOne(userId: string, id: string) {
-    const rpcRow = await this.findOneViaProtectedRpc(userId, id);
-    if (rpcRow) return rpcRow;
-
     const sb = this.supabase.getClient();
     const { data: row } = await sb.from('Demanda').select('*').eq('id', id).single();
     if (!row) throw new NotFoundException('Demanda não encontrada');
     const can = await this.visibility.canViewDemanda(userId, id, row.criador_id ?? null);
     if (!can) throw new ForbiddenException('Sem permissão para ver esta demanda');
+    await this.syncLegacyAttachmentLinks(id, row.legacy_id ?? null);
+
+    const rpcRow = await this.findOneViaProtectedRpc(userId, id);
+    if (rpcRow) return rpcRow;
+
     const rel = await this.loadDemandaRelationsBatch([row], true);
     const rec = (rel.recorrenciaByDemanda.get(id) ?? null) as { data_base?: unknown; tipo?: string; prazo_reabertura_dias?: number } | null;
     return {
@@ -2297,6 +2305,13 @@ export class DemandasService {
 
   private async resolveLegacyDemandaId(demandaId: string): Promise<string | null> {
     const sb = this.supabase.getClient();
+    const { data: demanda } = await sb
+      .from('Demanda')
+      .select('legacy_id')
+      .eq('id', demandaId)
+      .maybeSingle();
+    if (demanda?.legacy_id) return String(demanda.legacy_id);
+
     const { data: anexo } = await sb
       .from('anexo')
       .select('storage_path')
@@ -2306,6 +2321,33 @@ export class DemandasService {
       .maybeSingle();
     const parsed = this.parseLegacyStoragePath(anexo?.storage_path);
     return parsed?.demandaId || null;
+  }
+
+  private async syncLegacyAttachmentLinks(demandaId: string, legacyDemandaId?: string | null): Promise<void> {
+    if (!this.hasLegacyCredentials()) return;
+    const legacyId = legacyDemandaId || (await this.resolveLegacyDemandaId(demandaId));
+    if (!legacyId) return;
+
+    const sb = this.supabase.getClient();
+    const { data: existing } = await sb.from('anexo').select('id').eq('demanda_id', demandaId).limit(1);
+    if (existing?.length) return;
+
+    try {
+      const anexos = await this.listLegacyAttachments(legacyId);
+      for (const item of anexos) {
+        const { data: duplicate } = await sb.from('anexo').select('id').eq('storage_path', item.storagePath).limit(1);
+        if (duplicate?.length) continue;
+        await sb.from('anexo').insert({
+          demanda_id: demandaId,
+          filename: item.filename || 'Anexo legado',
+          mime_type: this.guessMimeType(item.filename),
+          size: 0,
+          storage_path: item.storagePath,
+        });
+      }
+    } catch {
+      return;
+    }
   }
 
   private guessMimeType(filename?: string | null): string {
@@ -2394,6 +2436,14 @@ export class DemandasService {
       filename,
       storagePath: this.buildLegacyStoragePath(legacyDemandaId, '', `${base}/painel/demandas/anexos/${legacyDemandaId}`),
     };
+  }
+
+  private async listLegacyAttachments(legacyDemandaId: string): Promise<Array<{ filename: string; storagePath: string }>> {
+    const session = await this.createLegacySession();
+    const base = this.legacyBaseUrl();
+    const response = await fetch(`${base}/painel/demandas/anexos/${legacyDemandaId}`, { headers: { Cookie: session.cookie } });
+    if (!response.ok) return [];
+    return this.parseLegacyAnexosPage(await response.text(), legacyDemandaId);
   }
 
   private parseLegacyAnexosPage(html: string, legacyDemandaId: string): Array<{ filename: string; storagePath: string }> {

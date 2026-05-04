@@ -101,6 +101,19 @@ public sealed class LegacyAttachmentService
                 BuildLegacyStoragePath(legacyDemandaId, string.Empty, ResolveLegacyPath($"/painel/demandas/anexos/{legacyDemandaId}")));
     }
 
+    public async Task<IReadOnlyList<LegacyAttachmentMetadata>> ListAsync(string legacyDemandaId, CancellationToken cancellationToken)
+    {
+        if (!IsConfigured)
+        {
+            return Array.Empty<LegacyAttachmentMetadata>();
+        }
+
+        await EnsureLoggedInAsync(cancellationToken);
+        var client = CreateClient();
+        var html = await client.GetStringAsync(ResolveLegacyPath($"/painel/demandas/anexos/{legacyDemandaId}"), cancellationToken);
+        return ParseAttachments(html, legacyDemandaId);
+    }
+
     public static bool TryParseStoragePath(string? storagePath, out LegacyAttachmentRef reference)
     {
         reference = default;
