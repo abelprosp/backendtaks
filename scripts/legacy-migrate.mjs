@@ -21,9 +21,12 @@ const DEFAULT_OPTIONS = {
   limitTemplates: null,
   limitDemandPages: null,
   limitDemands: null,
+  demandIds: null,
   demandBatchSize: 100,
   concurrency: 4,
   skipAnexos: false,
+  linkAnexos: false,
+  forceAnexos: false,
   writeSnapshot: true,
 };
 
@@ -169,6 +172,13 @@ function parseArgs(argv) {
       options.limitDemands = toNullableInt(arg.slice('--limit-demands='.length));
       continue;
     }
+    if (arg.startsWith('--demand-ids=')) {
+      options.demandIds = arg.slice('--demand-ids='.length)
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      continue;
+    }
     if (arg.startsWith('--demand-batch-size=')) {
       options.demandBatchSize = Math.max(1, Number.parseInt(arg.slice('--demand-batch-size='.length), 10) || 1);
       continue;
@@ -179,6 +189,14 @@ function parseArgs(argv) {
     }
     if (arg === '--skip-anexos') {
       options.skipAnexos = true;
+      continue;
+    }
+    if (arg === '--link-anexos') {
+      options.linkAnexos = true;
+      continue;
+    }
+    if (arg === '--force-anexos') {
+      options.forceAnexos = true;
       continue;
     }
     if (arg === '--no-snapshot') {
@@ -1699,12 +1717,27 @@ async function replaceCollection(supabase, table, filterQuery, rows) {
   await supabase.insert(table, normalizeRowsForInsert(rows), { select: '*' });
 }
 
+async function tryPatchDemandaLegacyId(supabase, demandaId, legacyId, warnings) {
+  if (!demandaId || !legacyId) return;
+  try {
+    await supabase.patch('Demanda', `id=eq.${encodeEq(demandaId)}`, {
+      legacy_id: legacyId,
+    }, { select: 'id' });
+  } catch (error) {
+    warnings?.push(`demanda ${legacyId}: não consegui gravar legacy_id em Demanda; aplique a migration 20260504_add_legacy_attachment_links.sql para habilitar upload direto no legado.`);
+  }
+}
+
 function getAnexosBucketName() {
   return (process.env.SUPABASE_STORAGE_BUCKET || 'demandas-anexos').trim() || 'demandas-anexos';
 }
 
 function buildSupabaseStoragePath(bucket, objectPath) {
   return `supabase://${bucket}/${objectPath}`;
+}
+
+function buildLegacyStoragePath(legacyDemandaId, legacyAnexoId, downloadUrl) {
+  return `legacy://demandas/${encodeURIComponent(legacyDemandaId || '')}/anexos/${encodeURIComponent(legacyAnexoId || '')}?url=${encodeURIComponent(downloadUrl || '')}`;
 }
 
 async function ensureAnexosBucket(context) {
@@ -1753,7 +1786,7 @@ async function downloadLegacyAttachment(downloadUrl) {
 async function syncDemandaAnexos(context, legacy, demanda, demandaId) {
   const mapKey = demanda.legacyId;
   if (!demandaId || !mapKey) return;
-  if (context.map.anexos[mapKey]) return;
+  if (context.map.anexos[mapKey] && !context.options.forceAnexos) return;
 
   const attachmentPagePath = `/painel/demandas/anexos/${mapKey}`;
   let parsed;
@@ -1770,21 +1803,32 @@ async function syncDemandaAnexos(context, legacy, demanda, demandaId) {
     return;
   }
 
-  const bucket = await ensureAnexosBucket(context);
   const anexoRows = [];
 
   for (const anexo of parsed.anexos) {
     try {
-      const download = await downloadLegacyAttachment(anexo.downloadUrl);
       const originalFilename = sanitizeFilename(anexo.filename || filenameFromUrl(anexo.downloadUrl)) || 'arquivo';
-      const objectPath = `demandas/${demandaId}/legacy-${sanitizeFilename(anexo.legacyId || 'sem-id')}-${originalFilename}`;
-      const mimeType = download.contentType || guessMimeType(originalFilename);
+      const mimeType = guessMimeType(originalFilename);
 
+      if (context.options.linkAnexos) {
+        anexoRows.push({
+          demanda_id: demandaId,
+          filename: originalFilename,
+          mime_type: mimeType,
+          size: 0,
+          storage_path: buildLegacyStoragePath(mapKey, anexo.legacyId || '', anexo.downloadUrl),
+        });
+        continue;
+      }
+
+      const bucket = await ensureAnexosBucket(context);
+      const download = await downloadLegacyAttachment(anexo.downloadUrl);
+      const objectPath = `demandas/${demandaId}/legacy-${sanitizeFilename(anexo.legacyId || 'sem-id')}-${originalFilename}`;
       await context.supabase.uploadObject(bucket, objectPath, download.buffer, mimeType, { upsert: false });
       anexoRows.push({
         demanda_id: demandaId,
         filename: originalFilename,
-        mime_type: mimeType,
+        mime_type: download.contentType || mimeType,
         size: download.buffer.length,
         storage_path: buildSupabaseStoragePath(bucket, objectPath),
       });
@@ -1799,6 +1843,8 @@ async function syncDemandaAnexos(context, legacy, demanda, demandaId) {
     `demanda_id=eq.${encodeEq(demandaId)}`,
     anexoRows,
   );
+
+  await tryPatchDemandaLegacyId(context.supabase, demandaId, mapKey, context.warnings);
 
   const currentDemanda = await queryOne(
     context.supabase,
@@ -1817,16 +1863,17 @@ async function syncDemandaAnexos(context, legacy, demanda, demandaId) {
 
 async function backfillMappedDemandAttachments(context, legacy, options) {
   const pendingEntries = Object.entries(context.map.demandas)
-    .filter(([legacyId, demandaId]) => legacyId && demandaId && !context.map.anexos[legacyId]);
+    .filter(([legacyId, demandaId]) => legacyId && demandaId && (options.forceAnexos || !context.map.anexos[legacyId]))
+    .filter(([legacyId]) => !options.demandIds?.length || options.demandIds.includes(legacyId));
   const limitedEntries = limitArray(pendingEntries, options.limitDemands);
 
   console.log(`demandas com anexos pendentes: ${limitedEntries.length}`);
   let index = 0;
-  for (const [legacyId, demandaId] of limitedEntries) {
+  await mapConcurrent(limitedEntries, options.concurrency, async ([legacyId, demandaId]) => {
     index += 1;
     console.log(`anexos ${index}/${limitedEntries.length}: demanda ${legacyId}`);
     await syncDemandaAnexos(context, legacy, { legacyId }, demandaId);
-  }
+  });
 }
 
 async function importTemplates(context, templates) {
@@ -1987,6 +2034,10 @@ async function importDemandas(context, demandas, options = DEFAULT_OPTIONS) {
         updated_at: demanda.updatedAt ? demanda.updatedAt.replace('T', ' ') : undefined,
       });
       demandaId = (Array.isArray(createdRows) ? createdRows[0] : createdRows).id;
+      await tryPatchDemandaLegacyId(context.supabase, demandaId, demanda.legacyId, warnings);
+    }
+    else if (demanda.legacyId) {
+      await tryPatchDemandaLegacyId(context.supabase, demandaId, demanda.legacyId, warnings);
     }
 
     const setorIds = resolveSetorIds(context.reference, demanda.setores, warnings, `demanda ${demanda.legacyId}`);
@@ -2185,6 +2236,7 @@ async function main() {
     userDirectory,
     warnings,
     legacy,
+    options,
     anexosBucket: null,
     anexosBucketReady: false,
   };

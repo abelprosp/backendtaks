@@ -185,7 +185,7 @@ public sealed class DemandasController : ControllerBase
 
     [HttpPost("{id}/anexos")]
     [RequestFormLimits(MultipartBodyLengthLimit = 100_000_000)]
-    public async Task<IActionResult> AddAnexo(string id, [FromForm] IFormFile? file, CancellationToken cancellationToken)
+    public async Task<IActionResult> AddAnexo(string id, [FromForm] IFormFile? file, [FromForm] string? nome, CancellationToken cancellationToken)
     {
         if (file is null || file.Length == 0)
         {
@@ -203,6 +203,7 @@ public sealed class DemandasController : ControllerBase
                 id,
                 memory.ToArray(),
                 file.FileName,
+                nome,
                 file.ContentType,
                 file.Length,
                 cancellationToken));

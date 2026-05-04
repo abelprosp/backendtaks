@@ -29,5 +29,15 @@ services:
         value: 365d
       - key: SUPABASE_STORAGE_BUCKET
         value: demandas-anexos
+      - key: LEGACY_BASE_URL
+        value: http://luxusweb.com.br
+      - key: LEGACY_EMAIL
+        sync: false
+      - key: LEGACY_PASSWORD
+        sync: false
+      - key: PREFER_LEGACY_ATTACHMENTS
+        value: true
+      - key: REQUIRE_LEGACY_ATTACHMENTS
+        value: false
       - key: OPENAI_API_KEY
         sync: false

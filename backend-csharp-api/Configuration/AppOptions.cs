@@ -15,6 +15,11 @@ public sealed class AppOptions
     public string LegacyImportedPasswordHash { get; set; } = string.Empty;
     public string OpenAiApiKey { get; set; } = string.Empty;
     public string SupabaseStorageBucket { get; set; } = "demandas-anexos";
+    public string LegacyBaseUrl { get; set; } = "http://luxusweb.com.br";
+    public string LegacyEmail { get; set; } = string.Empty;
+    public string LegacyPassword { get; set; } = string.Empty;
+    public bool PreferLegacyAttachments { get; set; } = false;
+    public bool RequireLegacyAttachments { get; set; } = false;
     public string SmtpHost { get; set; } = string.Empty;
     public int SmtpPort { get; set; } = 587;
     public string SmtpUsername { get; set; } = string.Empty;

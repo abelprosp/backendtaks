@@ -86,6 +86,7 @@ CREATE TABLE "Cliente" (
 
 CREATE TABLE "Demanda" (
   "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "legacy_id" TEXT,
   "protocolo" TEXT NOT NULL UNIQUE,
   "assunto" TEXT NOT NULL,
   "prioridade" BOOLEAN NOT NULL DEFAULT false,
@@ -220,6 +221,7 @@ CREATE TABLE "template_evento" (
 
 -- Índices sugeridos
 CREATE INDEX "Demanda_criador_id_idx" ON "Demanda"("criador_id");
+CREATE UNIQUE INDEX IF NOT EXISTS "Demanda_legacy_id_uidx" ON "Demanda"("legacy_id") WHERE "legacy_id" IS NOT NULL;
 CREATE INDEX "Demanda_prazo_idx" ON "Demanda"("prazo");
 CREATE INDEX "Demanda_status_idx" ON "Demanda"("status");
 CREATE INDEX "Demanda_created_at_idx" ON "Demanda"("created_at");
@@ -253,6 +255,7 @@ CREATE INDEX IF NOT EXISTS "demanda_cliente_demanda_id_idx" ON "demanda_cliente"
 CREATE INDEX IF NOT EXISTS "demanda_cliente_cliente_id_idx" ON "demanda_cliente"("cliente_id");
 CREATE INDEX IF NOT EXISTS "subtarefa_demanda_id_idx" ON "subtarefa"("demanda_id");
 CREATE INDEX IF NOT EXISTS "anexo_demanda_id_idx" ON "anexo"("demanda_id");
+CREATE INDEX IF NOT EXISTS "anexo_storage_path_idx" ON "anexo"("storage_path");
 
 CREATE OR REPLACE FUNCTION public.rpc_visible_demanda_ids(p_user_id uuid)
 RETURNS TABLE ("demanda_id" uuid)

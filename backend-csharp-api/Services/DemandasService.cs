@@ -16,6 +16,7 @@ public sealed class DemandasService
     private readonly TemplatesService _templates;
     private readonly AuditTrailService _audit;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly LegacyAttachmentService _legacyAttachments;
     private readonly AppOptions _options;
     private bool _anexosBucketReady;
 
@@ -25,6 +26,7 @@ public sealed class DemandasService
         TemplatesService templates,
         AuditTrailService audit,
         IHttpClientFactory httpClientFactory,
+        LegacyAttachmentService legacyAttachments,
         IOptions<AppOptions> options)
     {
         _supabase = supabase;
@@ -32,6 +34,7 @@ public sealed class DemandasService
         _templates = templates;
         _audit = audit;
         _httpClientFactory = httpClientFactory;
+        _legacyAttachments = legacyAttachments;
         _options = options.Value;
     }
 
@@ -508,7 +511,18 @@ public sealed class DemandasService
 
     public async Task<object> AddObservacaoAsync(string userId, string demandaId, string texto, CancellationToken cancellationToken)
     {
-        _ = await FindOneAsync(userId, demandaId, cancellationToken);
+        var demanda = await _supabase.QuerySingleAsync(
+            $"Demanda?select=*&id=eq.{Uri.EscapeDataString(demandaId)}&limit=1",
+            cancellationToken);
+        if (demanda is null)
+        {
+            throw new KeyNotFoundException("Demanda nao encontrada");
+        }
+
+        if (!await _visibility.CanViewDemandaAsync(userId, demandaId, cancellationToken))
+        {
+            throw new UnauthorizedAccessException("Sem permissao para ver esta demanda");
+        }
         if (string.IsNullOrWhiteSpace(texto))
         {
             throw new InvalidOperationException("Informe o texto da observação.");
@@ -545,7 +559,18 @@ public sealed class DemandasService
 
     public async Task<object> UpdateObservacaoAsync(string userId, string demandaId, string observacaoId, string texto, CancellationToken cancellationToken)
     {
-        _ = await FindOneAsync(userId, demandaId, cancellationToken);
+        var demanda = await _supabase.QuerySingleAsync(
+            $"Demanda?select=*&id=eq.{Uri.EscapeDataString(demandaId)}&limit=1",
+            cancellationToken);
+        if (demanda is null)
+        {
+            throw new KeyNotFoundException("Demanda nao encontrada");
+        }
+
+        if (!await _visibility.CanViewDemandaAsync(userId, demandaId, cancellationToken))
+        {
+            throw new UnauthorizedAccessException("Sem permissao para ver esta demanda");
+        }
         if (string.IsNullOrWhiteSpace(texto))
         {
             throw new InvalidOperationException("Informe o texto da observação.");
@@ -587,14 +612,67 @@ public sealed class DemandasService
         string demandaId,
         byte[] buffer,
         string originalFilename,
+        string? displayName,
         string contentType,
         long size,
         CancellationToken cancellationToken)
     {
-        _ = await FindOneAsync(userId, demandaId, cancellationToken);
+        var demanda = await _supabase.QuerySingleAsync(
+            $"Demanda?select=*&id=eq.{Uri.EscapeDataString(demandaId)}&limit=1",
+            cancellationToken);
+        if (demanda is null)
+        {
+            throw new KeyNotFoundException("Demanda nao encontrada");
+        }
+
+        if (!await _visibility.CanViewDemandaAsync(userId, demandaId, cancellationToken))
+        {
+            throw new UnauthorizedAccessException("Sem permissao para ver esta demanda");
+        }
         if (buffer.Length == 0)
         {
             throw new InvalidOperationException("Arquivo inválido.");
+        }
+
+        var legacyDemandaId = await ResolveLegacyDemandaIdAsync(demanda.Value, demandaId, cancellationToken);
+        if (_options.PreferLegacyAttachments && !string.IsNullOrWhiteSpace(legacyDemandaId) && _legacyAttachments.IsConfigured)
+        {
+            var legacy = await _legacyAttachments.UploadAsync(
+                legacyDemandaId,
+                buffer,
+                string.IsNullOrWhiteSpace(originalFilename) ? "file" : originalFilename,
+                string.IsNullOrWhiteSpace(displayName) ? originalFilename : displayName!,
+                string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType,
+                cancellationToken);
+
+            var createdLegacy = await _supabase.InsertSingleAsync("anexo", new
+            {
+                demanda_id = demandaId,
+                filename = string.IsNullOrWhiteSpace(legacy.Filename) ? originalFilename : legacy.Filename,
+                mime_type = string.IsNullOrWhiteSpace(contentType) ? GuessMimeType(legacy.Filename) : contentType,
+                size,
+                storage_path = legacy.StoragePath,
+            }, cancellationToken);
+
+            await _audit.AddDemandaEventAsync(
+                demandaId,
+                userId,
+                "anexo_adicionado",
+                $"Anexo adicionado no legado: {createdLegacy.GetStringOrEmpty("filename")}.",
+                new
+                {
+                    anexoId = createdLegacy.GetNullableString("id"),
+                    filename = createdLegacy.GetStringOrEmpty("filename"),
+                    storage = "legacy",
+                },
+                cancellationToken);
+
+            return createdLegacy.Clone();
+        }
+
+        if (_options.RequireLegacyAttachments)
+        {
+            throw new InvalidOperationException("Esta demanda ainda não possui vínculo com uma demanda do sistema antigo para armazenar anexos no legado.");
         }
 
         var safeName = $"{Guid.NewGuid():D}-{SanitizeFilename(string.IsNullOrWhiteSpace(originalFilename) ? "file" : originalFilename)}";
@@ -648,6 +726,15 @@ public sealed class DemandasService
         }
 
         var storage = ParseAnexoStoragePath(anexo.Value.GetNullableString("storage_path"));
+        if (LegacyAttachmentService.TryParseStoragePath(anexo.Value.GetNullableString("storage_path"), out var legacyReference))
+        {
+            var legacyDownload = await _legacyAttachments.DownloadAsync(legacyReference, cancellationToken);
+            return new DemandaDownloadResult(
+                legacyDownload.Buffer,
+                anexo.Value.GetStringOrEmpty("filename"),
+                anexo.Value.GetNullableString("mime_type") ?? legacyDownload.ContentType ?? "application/octet-stream");
+        }
+
         if (storage.Mode == "supabase")
         {
             var download = await _supabase.DownloadObjectAsync(storage.Bucket!, storage.ObjectPath, cancellationToken);
@@ -1877,6 +1964,27 @@ public sealed class DemandasService
     private static string SanitizeFilename(string filename) =>
         Regex.Replace(filename, @"[^a-zA-Z0-9._-]", "_");
 
+    private static string GuessMimeType(string? filename)
+    {
+        var extension = Path.GetExtension(filename ?? string.Empty).ToLowerInvariant();
+        return extension switch
+        {
+            ".pdf" => "application/pdf",
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".gif" => "image/gif",
+            ".webp" => "image/webp",
+            ".txt" => "text/plain",
+            ".csv" => "text/csv",
+            ".doc" => "application/msword",
+            ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".xls" => "application/vnd.ms-excel",
+            ".xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".zip" => "application/zip",
+            _ => "application/octet-stream",
+        };
+    }
+
     private static string StatusLabelPt(string status) =>
         status switch
         {
@@ -2532,6 +2640,23 @@ public sealed class DemandasService
             $"anexo?select=*&demanda_id=eq.{Uri.EscapeDataString(demandaId)}",
             cancellationToken);
         return rows.Select(row => (object)row.Clone()).ToList();
+    }
+
+    private async Task<string?> ResolveLegacyDemandaIdAsync(JsonElement demanda, string demandaId, CancellationToken cancellationToken)
+    {
+        var legacyId = demanda.GetNullableString("legacy_id");
+        if (!string.IsNullOrWhiteSpace(legacyId))
+        {
+            return legacyId;
+        }
+
+        var rows = await _supabase.QueryRowsAsync(
+            $"anexo?select=storage_path&demanda_id=eq.{Uri.EscapeDataString(demandaId)}&storage_path=like.legacy*&limit=1",
+            cancellationToken);
+        var storagePath = rows.FirstOrDefault().GetNullableString("storage_path");
+        return LegacyAttachmentService.TryParseStoragePath(storagePath, out var reference)
+            ? reference.DemandaId
+            : null;
     }
 
     private async Task<JsonElement?> LoadRecorrenciaAsync(string demandaId, CancellationToken cancellationToken) =>
