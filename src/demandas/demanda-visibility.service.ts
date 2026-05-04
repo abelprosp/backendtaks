@@ -5,8 +5,21 @@ import { MemoryTtlCache } from '../common/memory-ttl-cache';
 @Injectable()
 export class DemandaVisibilityService {
   private readonly visibleIdsCache = new MemoryTtlCache<string, string[]>(15_000);
+  private readonly adminCache = new MemoryTtlCache<string, boolean>(60_000);
 
   constructor(private supabase: SupabaseService) {}
+
+  private async isAdmin(userId: string): Promise<boolean> {
+    return this.adminCache.getOrLoad(userId, async () => {
+      const sb = this.supabase.getClient();
+      const { data: roleLinks } = await sb.from('user_role').select('role_id').eq('user_id', userId);
+      const roleIds = (roleLinks ?? []).map((item: any) => item.role_id).filter(Boolean);
+      if (!roleIds.length) return false;
+
+      const { data: roles } = await sb.from('Role').select('slug').in('id', roleIds);
+      return (roles ?? []).some((role: any) => String(role?.slug ?? '').toLowerCase() === 'admin');
+    });
+  }
 
   private async getVisibleIdsViaRpc(userId: string): Promise<string[] | null> {
     const { data, error } = await this.supabase.getClient().rpc('rpc_visible_demanda_ids', { p_user_id: userId });
@@ -21,6 +34,8 @@ export class DemandaVisibilityService {
   }
 
   async canViewDemanda(userId: string, demandaId: string, criadorId?: string | null): Promise<boolean> {
+    if (await this.isAdmin(userId)) return true;
+
     const sb = this.supabase.getClient();
     const demandaCriadorId =
       criadorId ??
@@ -51,6 +66,11 @@ export class DemandaVisibilityService {
   /** Retorna lista de demanda IDs que o usuário pode ver (para filtrar na listagem). */
   async visibleDemandaIds(userId: string): Promise<string[]> {
     return this.visibleIdsCache.getOrLoad(userId, async () => {
+      if (await this.isAdmin(userId)) {
+        const { data } = await this.supabase.getClient().from('Demanda').select('id');
+        return [...new Set((data ?? []).map((item: any) => String(item?.id ?? '')).filter(Boolean))];
+      }
+
       const rpcIds = await this.getVisibleIdsViaRpc(userId);
       if (rpcIds) return [...new Set(rpcIds)];
 
