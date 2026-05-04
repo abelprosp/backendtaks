@@ -4,7 +4,6 @@ import * as fs from 'fs';
 import OpenAI from 'openai';
 import * as path from 'path';
 import mammoth from 'mammoth';
-import { PDFParse } from 'pdf-parse';
 
 export type IaContextScope = 'geral' | 'filtros_demandas' | 'conferencia_mensagens';
 
@@ -152,6 +151,7 @@ export class IaContextService {
   private async extractText(buffer: Buffer, extension: string): Promise<string> {
     if (extension === '.txt') return buffer.toString('utf-8');
     if (extension === '.pdf') {
+      const { PDFParse } = await import('pdf-parse');
       const parser = new PDFParse({ data: buffer });
       const result = await parser.getText();
       await parser.destroy();
