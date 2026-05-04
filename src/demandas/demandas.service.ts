@@ -832,6 +832,7 @@ export class DemandasService {
     if (!data.length) return undefined;
 
     const row = (data as any[])[0] ?? {};
+    const attachmentAuditLookup = await this.loadAttachmentAuditLookup(id);
     const rec = row?.recorrencia_config ?? null;
     return {
       ...mapDemandaList(
@@ -843,7 +844,7 @@ export class DemandasService {
       ),
       subtarefas: this.parseRpcJsonArray(row?.subtarefas),
       observacoes: this.parseRpcJsonArray(row?.observacoes),
-      anexos: this.parseRpcJsonArray(row?.anexos),
+      anexos: this.enrichAnexosWithAudit(this.parseRpcJsonArray(row?.anexos), attachmentAuditLookup),
       recorrenciaConfig: rec
         ? {
             dataBase:
@@ -2055,6 +2056,7 @@ export class DemandasService {
     if (rpcRow) return rpcRow;
 
     const rel = await this.loadDemandaRelationsBatch([row], true);
+    const attachmentAuditLookup = await this.loadAttachmentAuditLookup(id);
     const rec = (rel.recorrenciaByDemanda.get(id) ?? null) as { data_base?: unknown; tipo?: string; prazo_reabertura_dias?: number } | null;
     return {
       ...mapDemandaList(
@@ -2066,7 +2068,7 @@ export class DemandasService {
       ),
       subtarefas: rel.subtarefasByDemanda.get(id) ?? [],
       observacoes: rel.observacoesByDemanda.get(id) ?? [],
-      anexos: rel.anexosByDemanda.get(id) ?? [],
+      anexos: this.enrichAnexosWithAudit(rel.anexosByDemanda.get(id) ?? [], attachmentAuditLookup),
       recorrenciaConfig: rec
         ? { dataBase: toDateISO(rec.data_base) ?? (typeof rec.data_base === 'string' ? rec.data_base : null), tipo: rec.tipo ?? '', prazoReaberturaDias: rec.prazo_reabertura_dias ?? 0 }
         : null,
@@ -2227,7 +2229,13 @@ export class DemandasService {
         .select()
         .single();
       if (error) throw new Error(error.message);
-      return data;
+      const audit = await this.insertAttachmentAudit(demandaId, userId, data.id, data.filename, nome?.trim() || data.filename);
+      return {
+        ...data,
+        displayName: audit.displayName,
+        createdAt: audit.createdAt,
+        createdBy: audit.createdBy,
+      };
     }
     if (this.requireLegacyAttachments()) {
       throw new BadRequestException('Esta demanda ainda nÃ£o possui vÃ­nculo com uma demanda do sistema antigo para armazenar anexos no legado.');
@@ -2255,7 +2263,13 @@ export class DemandasService {
       .select()
       .single();
     if (error) throw new Error(error.message);
-    return data;
+    const audit = await this.insertAttachmentAudit(demandaId, userId, data.id, data.filename, nome?.trim() || data.filename);
+    return {
+      ...data,
+      displayName: audit.displayName,
+      createdAt: audit.createdAt,
+      createdBy: audit.createdBy,
+    };
   }
 
   async getAnexoForDownload(userId: string, demandaId: string, anexoId: string) {
@@ -2309,6 +2323,91 @@ export class DemandasService {
     const { error } = await sb.from('anexo').delete().eq('id', anexoId).eq('demanda_id', demandaId);
     if (error) throw new Error(error.message);
     return { id: anexoId };
+  }
+
+  private async insertAttachmentAudit(
+    demandaId: string,
+    userId: string,
+    anexoId: string,
+    filename: string,
+    displayName: string,
+  ): Promise<{ displayName: string; createdAt: string; createdBy: { id: string; name: string; email?: string } | null }> {
+    const sb = this.supabase.getClient();
+    const createdAt = new Date().toISOString();
+    await sb.from('demanda_evento').insert({
+      demanda_id: demandaId,
+      user_id: userId,
+      tipo: 'anexo_adicionado',
+      descricao: `Anexo adicionado: ${displayName || filename}`,
+      metadata: {
+        title: 'Anexo adicionado',
+        summary: displayName || filename,
+        anexoId,
+        displayName: displayName || filename,
+        filename,
+      },
+      created_at: createdAt,
+    });
+
+    const { data: user } = await sb.from('User').select('id,name,email').eq('id', userId).maybeSingle();
+    return {
+      displayName: displayName || filename,
+      createdAt,
+      createdBy: user
+        ? { id: user.id, name: user.name, email: user.email }
+        : null,
+    };
+  }
+
+  private async loadAttachmentAuditLookup(
+    demandaId: string,
+  ): Promise<{ byId: Map<string, any>; byFilename: Map<string, any> }> {
+    const sb = this.supabase.getClient();
+    const { data: events } = await sb
+      .from('demanda_evento')
+      .select('metadata,created_at,user_id')
+      .eq('demanda_id', demandaId)
+      .eq('tipo', 'anexo_adicionado')
+      .order('created_at', { ascending: false });
+
+    const userIds = [...new Set((events ?? []).map((event: any) => event.user_id).filter(Boolean))];
+    const { data: users } = userIds.length
+      ? await sb.from('User').select('id,name,email').in('id', userIds)
+      : { data: [] as any[] };
+    const userById = new Map((users ?? []).map((user: any) => [String(user.id), user]));
+    const byId = new Map<string, any>();
+    const byFilename = new Map<string, any>();
+
+    for (const event of events ?? []) {
+      const metadata = event?.metadata ?? {};
+      const anexoId = String(metadata?.anexoId ?? '').trim();
+      const filename = String(metadata?.filename ?? '').trim();
+      const displayName = String(metadata?.displayName ?? metadata?.summary ?? filename).trim();
+      const user = event.user_id ? userById.get(String(event.user_id)) : null;
+      const auditInfo = {
+        displayName: displayName || filename || null,
+        createdAt: event.created_at ?? null,
+        createdBy: user ? { id: user.id, name: user.name, email: user.email } : null,
+      };
+      if (anexoId && !byId.has(anexoId)) byId.set(anexoId, auditInfo);
+      if (filename && !byFilename.has(filename)) byFilename.set(filename, auditInfo);
+    }
+
+    return { byId, byFilename };
+  }
+
+  private enrichAnexosWithAudit(anexos: any[], lookup: { byId: Map<string, any>; byFilename: Map<string, any> }): any[] {
+    return anexos.map((anexo: any) => {
+      const audit = lookup.byId.get(String(anexo?.id ?? '')) || lookup.byFilename.get(String(anexo?.filename ?? ''));
+      return audit
+        ? {
+            ...anexo,
+            displayName: audit.displayName || anexo.displayName || anexo.filename,
+            createdAt: audit.createdAt ?? anexo.createdAt ?? null,
+            createdBy: audit.createdBy ?? anexo.createdBy ?? null,
+          }
+        : anexo;
+    });
   }
 
   private legacyBaseUrl(): string {
