@@ -2287,6 +2287,30 @@ export class DemandasService {
     return { path: fullPath, filename: anexo.filename, mimeType: anexo.mime_type };
   }
 
+  async deleteAnexo(userId: string, demandaId: string, anexoId: string) {
+    await this.findOne(userId, demandaId);
+    const sb = this.supabase.getClient();
+    const { data: anexo } = await sb
+      .from('anexo')
+      .select('*')
+      .eq('id', anexoId)
+      .eq('demanda_id', demandaId)
+      .single();
+    if (!anexo) throw new NotFoundException('Anexo nao encontrado');
+
+    const legacyLocation = this.parseLegacyStoragePath(anexo.storage_path);
+    if (!legacyLocation) {
+      const storageLocation = this.parseAnexoStoragePath(anexo.storage_path);
+      if (storageLocation.mode === 'supabase') {
+        await sb.storage.from(storageLocation.bucket).remove([storageLocation.objectPath]);
+      }
+    }
+
+    const { error } = await sb.from('anexo').delete().eq('id', anexoId).eq('demanda_id', demandaId);
+    if (error) throw new Error(error.message);
+    return { id: anexoId };
+  }
+
   private legacyBaseUrl(): string {
     return (process.env.LEGACY_BASE_URL || 'http://luxusweb.com.br').replace(/\/+$/, '');
   }
@@ -2412,8 +2436,11 @@ export class DemandasService {
     const session = await this.createLegacySession();
     const base = this.legacyBaseUrl();
     const formPage = await fetch(`${base}/painel/demandas/anexos/${legacyDemandaId}`, { headers: { Cookie: session.cookie } });
-    const token = this.extractInputValue(await formPage.text(), '_token');
+    const formHtml = await formPage.text();
+    const token = this.extractInputValue(formHtml, '_token');
     if (!token) throw new ServiceUnavailableException('Não foi possível ler o formulário de anexos do legado.');
+
+    const beforePaths = new Set(this.parseLegacyAnexosPage(formHtml, legacyDemandaId).map((item) => item.storagePath));
 
     const form = new FormData();
     form.set('_token', token);
@@ -2432,10 +2459,13 @@ export class DemandasService {
     const updated = await fetch(`${base}/painel/demandas/anexos/${legacyDemandaId}`, { headers: { Cookie: session.cookie } });
     const anexos = this.parseLegacyAnexosPage(await updated.text(), legacyDemandaId);
     const filename = path.basename(originalFilename || 'arquivo');
-    return anexos.find((item) => item.filename.toLowerCase() === filename.toLowerCase()) || anexos[0] || {
-      filename,
-      storagePath: this.buildLegacyStoragePath(legacyDemandaId, '', `${base}/painel/demandas/anexos/${legacyDemandaId}`),
-    };
+    const created = anexos.filter((item) => !beforePaths.has(item.storagePath));
+    const exact = created.find((item) => item.filename.toLowerCase() === filename.toLowerCase());
+    const uploaded = exact || created[0];
+    if (!uploaded) {
+      throw new ServiceUnavailableException('O legado recebeu a requisicao, mas nao retornou um anexo novo para vincular.');
+    }
+    return uploaded;
   }
 
   private async listLegacyAttachments(legacyDemandaId: string): Promise<Array<{ filename: string; storagePath: string }>> {

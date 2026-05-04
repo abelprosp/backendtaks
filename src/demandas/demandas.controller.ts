@@ -159,4 +159,13 @@ export class DemandasController {
     if ('buffer' in download) return res.send(download.buffer);
     return res.sendFile(download.path);
   }
+
+  @Delete(':id/anexos/:anexoId')
+  deleteAnexo(
+    @Req() req: { user: { id: string } },
+    @Param('id') id: string,
+    @Param('anexoId') anexoId: string,
+  ) {
+    return this.demandasService.deleteAnexo(req.user.id, id, anexoId);
+  }
 }
