@@ -236,6 +236,21 @@ export class DemandasService {
     return `supabase://${bucket}/${objectPath}`;
   }
 
+  private buildLegacyStoragePath(legacyDemandaId: string, legacyAnexoId: string, downloadUrl: string): string {
+    return `legacy://demandas/${encodeURIComponent(legacyDemandaId)}/anexos/${encodeURIComponent(legacyAnexoId || '')}?url=${encodeURIComponent(downloadUrl || '')}`;
+  }
+
+  private parseLegacyStoragePath(storagePath: string | null | undefined): { demandaId: string; anexoId: string; downloadUrl: string } | null {
+    const raw = String(storagePath ?? '').trim();
+    const match = raw.match(/^legacy:\/\/demandas\/([^/]+)\/anexos\/([^?]*)(?:\?url=(.+))?$/i);
+    if (!match) return null;
+    return {
+      demandaId: decodeURIComponent(match[1] || ''),
+      anexoId: decodeURIComponent(match[2] || ''),
+      downloadUrl: decodeURIComponent(match[3] || ''),
+    };
+  }
+
   private parseAnexoStoragePath(storagePath: string | null | undefined):
     | { mode: 'supabase'; bucket: string; objectPath: string }
     | { mode: 'local'; objectPath: string } {
@@ -2179,9 +2194,36 @@ export class DemandasService {
     return this.findOne(userId, demandaId);
   }
 
-  async addAnexo(userId: string, demandaId: string, file: Express.Multer.File) {
+  async addAnexo(userId: string, demandaId: string, file: Express.Multer.File, nome?: string) {
     await this.findOne(userId, demandaId);
     if (!file?.buffer?.length) throw new BadRequestException('Arquivo inválido.');
+    const legacyDemandaId = await this.resolveLegacyDemandaId(demandaId);
+    if (this.preferLegacyAttachments() && legacyDemandaId && this.hasLegacyCredentials()) {
+      const legacy = await this.uploadLegacyAttachment(
+        legacyDemandaId,
+        file.buffer,
+        file.originalname || 'file',
+        nome?.trim() || file.originalname || 'file',
+        file.mimetype || 'application/octet-stream',
+      );
+      const sb = this.supabase.getClient();
+      const { data, error } = await sb
+        .from('anexo')
+        .insert({
+          demanda_id: demandaId,
+          filename: legacy.filename || file.originalname || 'file',
+          mime_type: file.mimetype || this.guessMimeType(legacy.filename),
+          size: file.size,
+          storage_path: legacy.storagePath,
+        })
+        .select()
+        .single();
+      if (error) throw new Error(error.message);
+      return data;
+    }
+    if (this.requireLegacyAttachments()) {
+      throw new BadRequestException('Esta demanda ainda nÃ£o possui vÃ­nculo com uma demanda do sistema antigo para armazenar anexos no legado.');
+    }
     const safeName = `${uuidv4()}-${(file.originalname || 'file').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
     const sb = this.supabase.getClient();
     const bucket = await this.ensureAnexosBucket();
@@ -2213,6 +2255,15 @@ export class DemandasService {
     const sb = this.supabase.getClient();
     const { data: anexo } = await sb.from('anexo').select('*').eq('id', anexoId).eq('demanda_id', demandaId).single();
     if (!anexo) throw new NotFoundException('Anexo não encontrado');
+    const legacyLocation = this.parseLegacyStoragePath(anexo.storage_path);
+    if (legacyLocation) {
+      const download = await this.downloadLegacyAttachment(legacyLocation.downloadUrl);
+      return {
+        buffer: download.buffer,
+        filename: anexo.filename,
+        mimeType: anexo.mime_type || download.contentType || 'application/octet-stream',
+      };
+    }
     const storageLocation = this.parseAnexoStoragePath(anexo.storage_path);
     if (storageLocation.mode === 'supabase') {
       const { data: fileData, error } = await sb.storage
@@ -2226,6 +2277,183 @@ export class DemandasService {
     const fullPath = path.resolve(path.join(uploadDir, storageLocation.objectPath));
     if (!fs.existsSync(fullPath)) throw new NotFoundException('Arquivo não encontrado');
     return { path: fullPath, filename: anexo.filename, mimeType: anexo.mime_type };
+  }
+
+  private legacyBaseUrl(): string {
+    return (process.env.LEGACY_BASE_URL || 'http://luxusweb.com.br').replace(/\/+$/, '');
+  }
+
+  private preferLegacyAttachments(): boolean {
+    return String(process.env.PREFER_LEGACY_ATTACHMENTS || '').toLowerCase() === 'true';
+  }
+
+  private requireLegacyAttachments(): boolean {
+    return String(process.env.REQUIRE_LEGACY_ATTACHMENTS || '').toLowerCase() === 'true';
+  }
+
+  private hasLegacyCredentials(): boolean {
+    return !!process.env.LEGACY_EMAIL?.trim() && !!process.env.LEGACY_PASSWORD?.trim();
+  }
+
+  private async resolveLegacyDemandaId(demandaId: string): Promise<string | null> {
+    const sb = this.supabase.getClient();
+    const { data: anexo } = await sb
+      .from('anexo')
+      .select('storage_path')
+      .eq('demanda_id', demandaId)
+      .like('storage_path', 'legacy%')
+      .limit(1)
+      .maybeSingle();
+    const parsed = this.parseLegacyStoragePath(anexo?.storage_path);
+    return parsed?.demandaId || null;
+  }
+
+  private guessMimeType(filename?: string | null): string {
+    const ext = path.extname(filename || '').toLowerCase();
+    const map: Record<string, string> = {
+      '.pdf': 'application/pdf',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.txt': 'text/plain',
+      '.csv': 'text/csv',
+      '.doc': 'application/msword',
+      '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      '.xls': 'application/vnd.ms-excel',
+      '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      '.zip': 'application/zip',
+    };
+    return map[ext] || 'application/octet-stream';
+  }
+
+  private async createLegacySession(): Promise<{ cookie: string }> {
+    if (!this.hasLegacyCredentials()) throw new ServiceUnavailableException('Integração com anexos do legado não configurada.');
+    const base = this.legacyBaseUrl();
+    const loginPage = await fetch(`${base}/login`);
+    const cookie = this.readSetCookie(loginPage);
+    const html = await loginPage.text();
+    const token = this.extractInputValue(html, '_token');
+    if (!token) throw new ServiceUnavailableException('Não foi possível ler o token de login do legado.');
+    const body = new URLSearchParams({
+      _token: token,
+      email: process.env.LEGACY_EMAIL || '',
+      password: process.env.LEGACY_PASSWORD || '',
+    });
+    const login = await fetch(`${base}/login`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+      body,
+    });
+    return { cookie: this.mergeCookies(cookie, this.readSetCookie(login)) };
+  }
+
+  private async downloadLegacyAttachment(downloadUrl: string): Promise<{ buffer: Buffer; contentType: string | null }> {
+    const session = await this.createLegacySession();
+    const response = await fetch(this.resolveLegacyUrl(downloadUrl), { headers: { Cookie: session.cookie }, redirect: 'follow' });
+    if (!response.ok) throw new NotFoundException('Arquivo não encontrado no legado');
+    return {
+      buffer: Buffer.from(await response.arrayBuffer()),
+      contentType: response.headers.get('content-type'),
+    };
+  }
+
+  private async uploadLegacyAttachment(
+    legacyDemandaId: string,
+    buffer: Buffer,
+    originalFilename: string,
+    displayName: string,
+    contentType: string,
+  ): Promise<{ filename: string; storagePath: string }> {
+    const session = await this.createLegacySession();
+    const base = this.legacyBaseUrl();
+    const formPage = await fetch(`${base}/painel/demandas/anexos/${legacyDemandaId}`, { headers: { Cookie: session.cookie } });
+    const token = this.extractInputValue(await formPage.text(), '_token');
+    if (!token) throw new ServiceUnavailableException('Não foi possível ler o formulário de anexos do legado.');
+
+    const form = new FormData();
+    form.set('_token', token);
+    form.set('nome', displayName || originalFilename);
+    form.set('enviar', 'Incluir');
+    const fileBytes = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+    form.set('imagem', new Blob([fileBytes], { type: contentType || 'application/octet-stream' }), originalFilename || 'arquivo');
+    const response = await fetch(`${base}/painel/demandas/anexos/cadastrar/${legacyDemandaId}`, {
+      method: 'POST',
+      headers: { Cookie: session.cookie },
+      body: form,
+      redirect: 'follow',
+    });
+    if (!response.ok) throw new ServiceUnavailableException('Falha ao salvar anexo no legado.');
+
+    const updated = await fetch(`${base}/painel/demandas/anexos/${legacyDemandaId}`, { headers: { Cookie: session.cookie } });
+    const anexos = this.parseLegacyAnexosPage(await updated.text(), legacyDemandaId);
+    const filename = path.basename(originalFilename || 'arquivo');
+    return anexos.find((item) => item.filename.toLowerCase() === filename.toLowerCase()) || anexos[0] || {
+      filename,
+      storagePath: this.buildLegacyStoragePath(legacyDemandaId, '', `${base}/painel/demandas/anexos/${legacyDemandaId}`),
+    };
+  }
+
+  private parseLegacyAnexosPage(html: string, legacyDemandaId: string): Array<{ filename: string; storagePath: string }> {
+    return [...html.matchAll(/<tr[\s\S]*?<\/tr>/gi)]
+      .map((match) => match[0])
+      .map((row) => {
+        const cells = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((cell) => this.stripTags(cell[1]));
+        const hrefs = [...row.matchAll(/href=["']([^"']+)["']/gi)].map((href) => this.resolveLegacyUrl(href[1]));
+        const downloadUrl = hrefs.find((href) => /\/assets\/uploads\/imgs\/demandas\/|\/download|arquivo/i.test(href));
+        if (!downloadUrl || !cells.length || /n[aã]o existem registros/i.test(cells[0])) return null;
+        const filename = cells[3] || path.basename(new URL(downloadUrl).pathname) || 'arquivo';
+        return {
+          filename,
+          storagePath: this.buildLegacyStoragePath(legacyDemandaId, cells[0] || '', downloadUrl),
+        };
+      })
+      .filter(Boolean) as Array<{ filename: string; storagePath: string }>;
+  }
+
+  private resolveLegacyUrl(url: string): string {
+    try {
+      return new URL(url, `${this.legacyBaseUrl()}/`).toString();
+    } catch {
+      return url;
+    }
+  }
+
+  private extractInputValue(html: string, name: string): string {
+    const match = html.match(new RegExp(`<input[^>]*name=["']${name}["'][^>]*value=["']([^"']*)["']`, 'i'));
+    return this.decodeHtml(match?.[1] || '');
+  }
+
+  private readSetCookie(response: Response): string {
+    const raw = (response.headers as any).getSetCookie?.() || [];
+    const values = Array.isArray(raw) ? raw : [];
+    return values.map((item) => String(item).split(';')[0]).filter(Boolean).join('; ');
+  }
+
+  private mergeCookies(first: string, second: string): string {
+    const map = new Map<string, string>();
+    for (const cookie of `${first}; ${second}`.split(';')) {
+      const trimmed = cookie.trim();
+      const index = trimmed.indexOf('=');
+      if (index > 0) map.set(trimmed.slice(0, index), trimmed.slice(index + 1));
+    }
+    return [...map.entries()].map(([key, value]) => `${key}=${value}`).join('; ');
+  }
+
+  private stripTags(html: string): string {
+    return this.decodeHtml(String(html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+  }
+
+  private decodeHtml(value: string): string {
+    return String(value || '')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&#039;/g, "'")
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&nbsp;/g, ' ');
   }
 
   private async isResponsavelPrincipal(userId: string, demandaId: string): Promise<boolean> {

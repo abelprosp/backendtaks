@@ -140,9 +140,10 @@ export class DemandasController {
     @Req() req: { user: { id: string } },
     @Param('id') id: string,
     @UploadedFile() file: Express.Multer.File,
+    @Body() body: { nome?: string },
   ) {
     if (!file) throw new BadRequestException('Envie um arquivo (campo "file")');
-    return this.demandasService.addAnexo(req.user.id, id, file);
+    return this.demandasService.addAnexo(req.user.id, id, file, body?.nome);
   }
 
   @Get(':id/anexos/:anexoId/download')
