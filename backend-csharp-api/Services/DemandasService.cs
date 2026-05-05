@@ -229,6 +229,22 @@ public sealed class DemandasService
                 return new { data = Array.Empty<object>(), total = 0 };
             }
         }
+        if (!string.IsNullOrWhiteSpace(filters.CondicaoPrazo))
+        {
+            var prazoRows = await _supabase.QueryAllRowsAsync(
+                "Demanda?select=id,prazo,status",
+                cancellationToken);
+            var prazoIds = prazoRows
+                .Where(row => MatchesCondicaoPrazo(row.GetNullableString("prazo"), row.GetStringOrEmpty("status"), filters.CondicaoPrazo))
+                .Select(row => row.GetStringOrEmpty("id"))
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .ToHashSet(StringComparer.Ordinal);
+            visibleIds = visibleIds.Where(prazoIds.Contains).ToList();
+            if (visibleIds.Count == 0)
+            {
+                return new { data = Array.Empty<object>(), total = 0 };
+            }
+        }
 
         if (!string.IsNullOrWhiteSpace(filters.ResponsavelPrincipalId))
         {
@@ -267,7 +283,7 @@ public sealed class DemandasService
                 p_criador_id = filters.CriadorId,
                 p_responsavel_principal_id = null as string,
                 p_setor_ids = filters.SetorIds?.Count > 0 ? filters.SetorIds : null,
-                p_condicao_prazo = filters.CondicaoPrazo,
+                p_condicao_prazo = null as string,
                 p_pesquisa_tarefa_ou_observacao = filters.PesquisarTarefaOuObservacao,
                 p_pesquisa_geral = filters.PesquisaGeral,
                 p_data_criacao_de = filters.DataCriacaoDe,
@@ -1305,7 +1321,7 @@ public sealed class DemandasService
         var mentionsPrioridade = QueryMentionsPrioridade(query);
         var mentionsStatus = QueryMentionsStatus(query);
         var mentionsRecorrencia = QueryMentions(query, "recorr", "diaria", "diario", "semanal", "quinzenal", "mensal");
-        var mentionsPrazo = QueryMentions(query, "prazo", "vencid", "finaliz");
+        var mentionsPrazo = QueryMentions(query, "prazo", "vencid", "finaliz", "a prazo", "ira vencer", "irá vencer");
         var filters = new ListDemandasFiltersQuery
         {
             ClienteId = mentionsCliente
@@ -1681,7 +1697,9 @@ public sealed class DemandasService
 
         if (normalized.Contains("vencid", StringComparison.Ordinal))
             filters.CondicaoPrazo = "vencido";
-        else if (normalized.Contains("no prazo", StringComparison.Ordinal) || normalized.Contains("dentro do prazo", StringComparison.Ordinal))
+        else if (normalized.Contains("no prazo", StringComparison.Ordinal)
+            || normalized.Contains("dentro do prazo", StringComparison.Ordinal)
+            || normalized.Contains("a prazo", StringComparison.Ordinal))
             filters.CondicaoPrazo = "no_prazo";
         else if (normalized.Contains("finalizada", StringComparison.Ordinal))
             filters.CondicaoPrazo = "finalizada";
@@ -1894,7 +1912,7 @@ public sealed class DemandasService
         return normalized switch
         {
             "vencido" or "vencida" => "vencido",
-            "no prazo" => "no_prazo",
+            "no prazo" or "a prazo" or "dentro do prazo" or "ira vencer" or "irá vencer" => "no_prazo",
             "finalizada" or "finalizado" => "finalizada",
             _ => null,
         };
@@ -3152,8 +3170,9 @@ public sealed class DemandasService
         }
 
         var createdAt = ParseDate(row.GetNullableString("created_at"));
-        var prazo = ParseDate(row.GetNullableString("prazo"));
         var status = row.GetStringOrEmpty("status");
+        var prazoText = row.GetNullableString("prazo");
+        var prazo = ParseDate(prazoText);
 
         var dataCriacaoDe = ParseDate(filters.DataCriacaoDe);
         if (dataCriacaoDe.HasValue && (!createdAt.HasValue || createdAt.Value.Date < dataCriacaoDe.Value.Date))
@@ -3181,27 +3200,62 @@ public sealed class DemandasService
 
         if (!string.IsNullOrWhiteSpace(filters.CondicaoPrazo))
         {
-            var today = DateTime.UtcNow.Date;
-            var condicao = filters.CondicaoPrazo.Trim();
-            if (string.Equals(condicao, "finalizada", StringComparison.Ordinal) && !string.Equals(status, "concluido", StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            if (string.Equals(condicao, "vencido", StringComparison.Ordinal)
-                && (!prazo.HasValue || prazo.Value.Date >= today))
-            {
-                return false;
-            }
-
-            if (string.Equals(condicao, "no_prazo", StringComparison.Ordinal)
-                && (!prazo.HasValue || prazo.Value.Date < today))
+            if (!MatchesCondicaoPrazo(prazoText, status, filters.CondicaoPrazo))
             {
                 return false;
             }
         }
 
         return true;
+    }
+
+    private static bool MatchesCondicaoPrazo(string? prazoValue, string? status, string? condicaoPrazo)
+    {
+        var condicao = condicaoPrazo?.Trim();
+        if (string.IsNullOrWhiteSpace(condicao))
+        {
+            return true;
+        }
+
+        if (string.Equals(condicao, "finalizada", StringComparison.Ordinal))
+        {
+            return string.Equals(status, "concluido", StringComparison.Ordinal)
+                || string.Equals(status, "cancelado", StringComparison.Ordinal);
+        }
+
+        if (string.Equals(status, "concluido", StringComparison.Ordinal)
+            || string.Equals(status, "cancelado", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var prazo = ParseDate(prazoValue);
+        if (!prazo.HasValue)
+        {
+            return false;
+        }
+
+        var today = GetTodayInSaoPaulo();
+        return condicao switch
+        {
+            "vencido" => prazo.Value.Date <= today,
+            "no_prazo" => prazo.Value.Date > today,
+            _ => true,
+        };
+    }
+
+    private static DateTime GetTodayInSaoPaulo()
+    {
+        try
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById("America/Sao_Paulo");
+            return TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, zone).Date;
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById("E. South America Standard Time");
+            return TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, zone).Date;
+        }
     }
 
     private static bool MatchesAdminPesquisaGeralBase(JsonElement row, string search)
