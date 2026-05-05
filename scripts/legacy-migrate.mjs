@@ -29,6 +29,8 @@ const DEFAULT_OPTIONS = {
   skipAnexos: false,
   linkAnexos: false,
   forceAnexos: false,
+  syncStatuses: false,
+  syncStatusesOnly: false,
   writeSnapshot: true,
 };
 
@@ -207,6 +209,18 @@ function parseArgs(argv) {
     }
     if (arg === '--force-anexos') {
       options.forceAnexos = true;
+      continue;
+    }
+    if (arg === '--sync-statuses') {
+      options.syncStatuses = true;
+      continue;
+    }
+    if (arg === '--sync-statuses-only') {
+      options.syncStatuses = true;
+      options.syncStatusesOnly = true;
+      options.apply = true;
+      options.phases = new Set(['demandas']);
+      options.writeSnapshot = false;
       continue;
     }
     if (arg === '--no-snapshot') {
@@ -1925,6 +1939,38 @@ async function backfillMappedDemandAttachments(context, legacy, options) {
   });
 }
 
+async function syncMappedDemandaStatuses(context, summaries) {
+  const existingSummaries = summaries.filter((item) => item.legacyId && context.map.demandas[item.legacyId]);
+  console.log(`demandas importadas encontradas no legado para conferir status: ${existingSummaries.length}`);
+  let checked = 0;
+  let updated = 0;
+  for (const summary of existingSummaries) {
+    const demandaId = context.map.demandas[summary.legacyId];
+    const legacyStatus = mapLegacyStatus(summary.status);
+    if (!demandaId || !legacyStatus) continue;
+    checked += 1;
+    const rows = await context.supabase.select(
+      `Demanda?select=id,status&legacy_id=eq.${encodeEq(summary.legacyId)}&limit=1`,
+    ).catch(() => []);
+    const row = Array.isArray(rows) ? rows[0] : null;
+    const currentStatus = row?.status;
+    if (!currentStatus || currentStatus === legacyStatus) continue;
+    await context.supabase.patch(
+      'Demanda',
+      `id=eq.${encodeEq(demandaId)}`,
+      {
+        status: legacyStatus,
+        resolvido_em: legacyStatus === 'concluido' ? new Date().toISOString() : null,
+        updated_at: new Date().toISOString(),
+      },
+      { select: 'id,status' },
+    );
+    updated += 1;
+    console.log(`status atualizado demanda ${summary.legacyId}: ${currentStatus} -> ${legacyStatus}`);
+  }
+  console.log(`sincronização de status: ${checked} conferidas, ${updated} atualizadas.`);
+}
+
 async function importTemplates(context, templates) {
   for (const template of templates) {
     console.log(`importando template ${template.legacyId} - ${template.name}`);
@@ -2226,10 +2272,11 @@ async function main() {
 
   const snapshot = { users: [], clients: [], templates: [], demandas: [] };
   let pendingDemandSummaries = [];
+  let demandSummaries = [];
   const legacy = new LegacySession(LEGACY_BASE_URL);
   await legacy.login(legacyEmail, legacyPassword);
 
-  if (options.phases.has('users') || options.phases.has('templates') || options.phases.has('demandas')) {
+  if (!options.syncStatusesOnly && (options.phases.has('users') || options.phases.has('templates') || options.phases.has('demandas'))) {
     console.log('coletando usuários do legado...');
     snapshot.users = await collectLegacyUsers(legacy, options);
   }
@@ -2246,9 +2293,9 @@ async function main() {
 
   if (options.phases.has('demandas')) {
     console.log('coletando listagem de demandas do legado...');
-    const summaries = await collectLegacyDemandSummaries(legacy, options);
-    pendingDemandSummaries = summaries.filter((item) => !existingMap.demandas[item.legacyId]);
-    console.log(`resumos de demandas coletados: ${summaries.length}`);
+    demandSummaries = await collectLegacyDemandSummaries(legacy, options);
+    pendingDemandSummaries = demandSummaries.filter((item) => !existingMap.demandas[item.legacyId]);
+    console.log(`resumos de demandas coletados: ${demandSummaries.length}`);
     console.log(`demandas pendentes para importar neste lote: ${pendingDemandSummaries.length}`);
     if (!options.apply) {
       console.log('coletando detalhes das demandas...');
@@ -2274,6 +2321,11 @@ async function main() {
   }
 
   const supabase = new SupabaseRestClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+  if (options.syncStatusesOnly) {
+    await syncMappedDemandaStatuses({ supabase, map: existingMap }, demandSummaries);
+    return;
+  }
+
   const reference = await loadReferenceData(supabase);
   const map = existingMap;
   const userDirectory = buildUserDirectory(snapshot.users);
@@ -2307,6 +2359,10 @@ async function main() {
 
   if (options.phases.has('demandas')) {
     await importDemandasInBatches(legacy, context, pendingDemandSummaries, options);
+  }
+
+  if (options.syncStatuses && demandSummaries.length > 0) {
+    await syncMappedDemandaStatuses(context, demandSummaries);
   }
 
   if (options.phases.has('anexos')) {

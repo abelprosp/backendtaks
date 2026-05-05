@@ -14,6 +14,7 @@ public sealed class AppOptions
     public string PasswordAccessTokenExpiresIn { get; set; } = "24h";
     public string LegacyImportedPasswordHash { get; set; } = string.Empty;
     public string OpenAiApiKey { get; set; } = string.Empty;
+    public string OpenAiModel { get; set; } = "gpt-4.1-mini";
     public string SupabaseStorageBucket { get; set; } = "demandas-anexos";
     public string LegacyBaseUrl { get; set; } = "http://luxusweb.com.br";
     public string LegacyEmail { get; set; } = string.Empty;

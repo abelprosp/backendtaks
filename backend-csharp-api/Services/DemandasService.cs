@@ -208,6 +208,18 @@ public sealed class DemandasService
                 return new { data = Array.Empty<object>(), total = 0 };
             }
         }
+        if (filters.OcultarConcluidas == true && string.IsNullOrWhiteSpace(filters.Status))
+        {
+            var unfinishedRows = await _supabase.QueryAllRowsAsync(
+                "Demanda?select=id&status=not.in.(concluido,cancelado)",
+                cancellationToken);
+            var unfinishedIds = unfinishedRows.Select(row => row.GetStringOrEmpty("id")).Where(id => !string.IsNullOrWhiteSpace(id)).ToHashSet(StringComparer.Ordinal);
+            visibleIds = visibleIds.Where(unfinishedIds.Contains).ToList();
+            if (visibleIds.Count == 0)
+            {
+                return new { data = Array.Empty<object>(), total = 0 };
+            }
+        }
 
         if (!string.IsNullOrWhiteSpace(filters.ResponsavelPrincipalId))
         {
@@ -609,7 +621,12 @@ public sealed class DemandasService
         await _supabase.UpdateSingleAsync(
             "observacao",
             $"id=eq.{Uri.EscapeDataString(observacaoId)}&demanda_id=eq.{Uri.EscapeDataString(demandaId)}",
-            new { texto = texto.Trim() },
+            new
+            {
+                texto = texto.Trim(),
+                user_id = userId,
+                created_at = DateTime.UtcNow.ToString("O"),
+            },
             cancellationToken);
 
         await _audit.AddDemandaEventAsync(
@@ -781,6 +798,7 @@ public sealed class DemandasService
             Assunto = filters.Assunto,
             Status = filters.Status,
             OcultarStandby = filters.OcultarStandby,
+            OcultarConcluidas = filters.OcultarConcluidas,
             TipoRecorrencia = filters.TipoRecorrencia,
             Protocolo = filters.Protocolo,
             Prioridade = filters.Prioridade,
@@ -1159,7 +1177,7 @@ public sealed class DemandasService
             request.Content = new StringContent(
                 JsonSerializer.Serialize(new
                 {
-                    model = "gpt-4o-mini",
+                    model = string.IsNullOrWhiteSpace(_options.OpenAiModel) ? "gpt-4.1-mini" : _options.OpenAiModel,
                     temperature = 0,
                     messages = new object[]
                     {
@@ -1574,6 +1592,7 @@ public sealed class DemandasService
         Add("assunto", filters.Assunto);
         Add("status", filters.Status);
         if (filters.OcultarStandby.HasValue) Add("ocultarStandby", filters.OcultarStandby.Value ? "true" : "false");
+        if (filters.OcultarConcluidas.HasValue) Add("ocultarConcluidas", filters.OcultarConcluidas.Value ? "true" : "false");
         Add("tipoRecorrencia", filters.TipoRecorrencia);
         Add("protocolo", filters.Protocolo);
         if (filters.Prioridade.HasValue) Add("prioridade", filters.Prioridade.Value ? "true" : "false");
@@ -3094,6 +3113,14 @@ public sealed class DemandasService
         if (filters.OcultarStandby == true
             && !string.Equals(filters.Status, "standby", StringComparison.Ordinal)
             && string.Equals(row.GetStringOrEmpty("status"), "standby", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (filters.OcultarConcluidas == true
+            && string.IsNullOrWhiteSpace(filters.Status)
+            && (string.Equals(row.GetStringOrEmpty("status"), "concluido", StringComparison.Ordinal)
+                || string.Equals(row.GetStringOrEmpty("status"), "cancelado", StringComparison.Ordinal)))
         {
             return false;
         }

@@ -33,11 +33,14 @@ public sealed class DemandaVisibilityService
         var asResponsavelTask = _supabase.QueryAllRowsAsync(
             $"demanda_responsavel?select=demanda_id&user_id=eq.{Uri.EscapeDataString(userId)}",
             cancellationToken);
+        var asSubtarefaResponsavelTask = _supabase.QueryAllRowsAsync(
+            $"subtarefa?select=demanda_id&responsavel_user_id=eq.{Uri.EscapeDataString(userId)}",
+            cancellationToken);
         var bySetorTask = _supabase.QueryAllRowsAsync(
             $"user_setor_permissao?select=setor_id&user_id=eq.{Uri.EscapeDataString(userId)}&can_view=eq.true",
             cancellationToken);
 
-        await Task.WhenAll(asCriadorTask, asResponsavelTask, bySetorTask);
+        await Task.WhenAll(asCriadorTask, asResponsavelTask, asSubtarefaResponsavelTask, bySetorTask);
 
         var ids = new HashSet<string>(
             asCriadorTask.Result
@@ -45,6 +48,14 @@ public sealed class DemandaVisibilityService
                 .Where(id => !string.IsNullOrWhiteSpace(id)));
 
         foreach (var item in asResponsavelTask.Result)
+        {
+            var demandaId = item.GetStringOrEmpty("demanda_id");
+            if (!string.IsNullOrWhiteSpace(demandaId))
+            {
+                ids.Add(demandaId);
+            }
+        }
+        foreach (var item in asSubtarefaResponsavelTask.Result)
         {
             var demandaId = item.GetStringOrEmpty("demanda_id");
             if (!string.IsNullOrWhiteSpace(demandaId))

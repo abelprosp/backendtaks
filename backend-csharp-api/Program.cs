@@ -23,6 +23,7 @@ builder.Services.Configure<AppOptions>(options =>
     options.PasswordAccessTokenExpiresIn = builder.Configuration["PASSWORD_ACCESS_TOKEN_EXPIRES_IN"] ?? "24h";
     options.LegacyImportedPasswordHash = builder.Configuration["LEGACY_IMPORTED_PASSWORD_HASH"] ?? string.Empty;
     options.OpenAiApiKey = builder.Configuration["OPENAI_API_KEY"] ?? string.Empty;
+    options.OpenAiModel = builder.Configuration["OPENAI_MODEL"] ?? "gpt-4.1-mini";
     options.SupabaseStorageBucket = builder.Configuration["SUPABASE_STORAGE_BUCKET"] ?? "demandas-anexos";
     options.LegacyBaseUrl = builder.Configuration["LEGACY_BASE_URL"] ?? "http://luxusweb.com.br";
     options.LegacyEmail = builder.Configuration["LEGACY_EMAIL"] ?? string.Empty;

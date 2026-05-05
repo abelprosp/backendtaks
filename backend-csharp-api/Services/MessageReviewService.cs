@@ -241,7 +241,7 @@ public sealed class MessageReviewService
         httpRequest.Content = new StringContent(
             JsonSerializer.Serialize(new
             {
-                model = "gpt-4o-mini",
+                model = string.IsNullOrWhiteSpace(_options.OpenAiModel) ? "gpt-4.1-mini" : _options.OpenAiModel,
                 temperature,
                 messages = new object[]
                 {
