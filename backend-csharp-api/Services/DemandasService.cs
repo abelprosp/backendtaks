@@ -47,6 +47,11 @@ public sealed class DemandasService
         {
             throw new InvalidOperationException("Apenas usuários ADM podem criar demandas privadas.");
         }
+        var setorIds = NormalizeUuidList(request.Setores);
+        var clienteIds = NormalizeUuidList(request.ClienteIds);
+        var responsaveis = NormalizeResponsaveis(request.Responsaveis);
+        var subtarefas = NormalizeCreateSubtarefas(request.Subtarefas);
+
         var created = await _supabase.InsertSingleAsync("Demanda", new
         {
             protocolo,
@@ -64,10 +69,10 @@ public sealed class DemandasService
         var demandaId = created.GetStringOrEmpty("id");
         await ReplaceDemandaRelationsAsync(
             demandaId,
-            request.Setores,
-            request.ClienteIds,
-            request.Responsaveis,
-            request.Subtarefas?.Select(item => new DemandaSubtarefaUpdateInput
+            setorIds,
+            clienteIds,
+            responsaveis,
+            subtarefas?.Select(item => new DemandaSubtarefaUpdateInput
             {
                 Titulo = item.Titulo,
                 Ordem = item.Ordem,
@@ -75,7 +80,7 @@ public sealed class DemandasService
                 Concluida = false,
             }).ToList(),
             cancellationToken);
-        await ReplacePrivateViewersAsync(demandaId, request.PrivateViewerIds, cancellationToken);
+        await ReplacePrivateViewersAsync(demandaId, NormalizeUuidList(request.PrivateViewerIds), cancellationToken);
 
         if (request.IsRecorrente == true && request.Recorrencia is not null)
         {
@@ -85,10 +90,10 @@ public sealed class DemandasService
         await RegistrarCriacaoDemandaAsync(
             userId,
             demandaId,
-            request.Setores?.Count ?? 0,
-            request.ClienteIds?.Count ?? 0,
-            request.Responsaveis?.Count ?? 0,
-            request.Subtarefas?.Count ?? 0,
+            setorIds?.Count ?? 0,
+            clienteIds?.Count ?? 0,
+            responsaveis?.Count ?? 0,
+            subtarefas?.Count ?? 0,
             request.IsRecorrente == true && request.Recorrencia is not null,
             null,
             cancellationToken);
@@ -111,21 +116,25 @@ public sealed class DemandasService
         var isRecorrente = !string.IsNullOrWhiteSpace(recorrenciaDataBase)
                            && template.IsRecorrenteDefault
                            && !string.IsNullOrWhiteSpace(template.RecorrenciaTipo);
-        var setorIds = request.SetorIds?.Count > 0 ? request.SetorIds : template.SetorIds;
-        var clienteIds = request.ClienteIds?.Count > 0 ? request.ClienteIds : template.ClienteIds;
-        var responsaveis = request.Responsaveis?.Count > 0
-            ? request.Responsaveis
+        var requestSetorIds = NormalizeUuidList(request.SetorIds);
+        var requestClienteIds = NormalizeUuidList(request.ClienteIds);
+        var setorIds = requestSetorIds?.Count > 0 ? requestSetorIds : NormalizeUuidList(template.SetorIds);
+        var clienteIds = requestClienteIds?.Count > 0 ? requestClienteIds : NormalizeUuidList(template.ClienteIds);
+        var requestResponsaveis = NormalizeResponsaveis(request.Responsaveis);
+        var responsaveis = requestResponsaveis?.Count > 0
+            ? requestResponsaveis
             : template.Responsaveis.Select(item => new DemandaResponsavelInput
             {
                 UserId = item.UserId,
                 IsPrincipal = item.IsPrincipal,
-            }).ToList();
-        var subtarefas = request.Subtarefas?.Count > 0
-            ? request.Subtarefas
+            }).Where(item => IsUuid(item.UserId)).ToList();
+        var requestSubtarefas = NormalizeCreateSubtarefas(request.Subtarefas);
+        var subtarefas = requestSubtarefas?.Count > 0
+            ? requestSubtarefas
             : template.Subtarefas.Select(item => new DemandaSubtarefaCreateInput
             {
                 Titulo = item.Titulo,
-                ResponsavelUserId = item.ResponsavelUserId,
+                ResponsavelUserId = IsUuid(item.ResponsavelUserId) ? item.ResponsavelUserId : null,
             }).ToList();
 
         var created = await _supabase.InsertSingleAsync("Demanda", new
@@ -156,7 +165,7 @@ public sealed class DemandasService
                 Concluida = false,
             }).ToList(),
             cancellationToken);
-        await ReplacePrivateViewersAsync(demandaId, request.PrivateViewerIds, cancellationToken);
+        await ReplacePrivateViewersAsync(demandaId, NormalizeUuidList(request.PrivateViewerIds), cancellationToken);
 
         if (isRecorrente && !string.IsNullOrWhiteSpace(recorrenciaDataBase) && !string.IsNullOrWhiteSpace(template.RecorrenciaTipo))
         {
@@ -3221,6 +3230,42 @@ public sealed class DemandasService
 
     private static string BuildIlikeValue(string raw) =>
         Uri.EscapeDataString($"*{raw.Trim()}*");
+
+    private static bool IsUuid(string? value) =>
+        !string.IsNullOrWhiteSpace(value) && Guid.TryParse(value, out _);
+
+    private static List<string>? NormalizeUuidList(IEnumerable<string>? values)
+    {
+        var list = values?
+            .Where(IsUuid)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        return list is { Count: > 0 } ? list : null;
+    }
+
+    private static List<DemandaResponsavelInput>? NormalizeResponsaveis(IEnumerable<DemandaResponsavelInput>? values)
+    {
+        var list = values?
+            .Where(item => IsUuid(item.UserId))
+            .GroupBy(item => item.UserId, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToList();
+        return list is { Count: > 0 } ? list : null;
+    }
+
+    private static List<DemandaSubtarefaCreateInput>? NormalizeCreateSubtarefas(IEnumerable<DemandaSubtarefaCreateInput>? values)
+    {
+        var list = values?
+            .Where(item => !string.IsNullOrWhiteSpace(item.Titulo))
+            .Select(item => new DemandaSubtarefaCreateInput
+            {
+                Titulo = item.Titulo.Trim(),
+                Ordem = item.Ordem,
+                ResponsavelUserId = IsUuid(item.ResponsavelUserId) ? item.ResponsavelUserId : null,
+            })
+            .ToList();
+        return list is { Count: > 0 } ? list : null;
+    }
 
     private static string FormatRecorrenciaDescription(RecorrenciaInput recorrencia)
     {
