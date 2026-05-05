@@ -249,10 +249,22 @@ public sealed class DemandasService
         if (!string.IsNullOrWhiteSpace(filters.ResponsavelPrincipalId))
         {
             var principalFilter = filters.ResponsavelApenasPrincipal == true ? "&is_principal=eq.true" : string.Empty;
-            var responsavelIds = await LoadIdsAsync(
+            var responsavelIds = (await LoadIdsAsync(
                 $"demanda_responsavel?select=demanda_id&user_id=eq.{Uri.EscapeDataString(filters.ResponsavelPrincipalId)}{principalFilter}&limit=100000",
                 "demanda_id",
-                cancellationToken);
+                cancellationToken)).ToHashSet(StringComparer.Ordinal);
+            if (string.Equals(filters.ResponsavelPrincipalId, userId, StringComparison.Ordinal)
+                && filters.ResponsavelApenasPrincipal != true)
+            {
+                responsavelIds.UnionWith(await LoadIdsAsync(
+                    $"Demanda?select=id&criador_id=eq.{Uri.EscapeDataString(userId)}&limit=100000",
+                    "id",
+                    cancellationToken));
+                responsavelIds.UnionWith(await LoadIdsAsync(
+                    $"subtarefa?select=demanda_id&responsavel_user_id=eq.{Uri.EscapeDataString(userId)}&limit=100000",
+                    "demanda_id",
+                    cancellationToken));
+            }
             visibleIds = visibleIds.Where(responsavelIds.Contains).ToList();
             if (visibleIds.Count == 0)
             {
