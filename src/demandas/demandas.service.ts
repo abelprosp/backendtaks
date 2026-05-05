@@ -48,6 +48,22 @@ function getTodayInSaoPaulo(): string {
   return year && month && day ? `${year}-${month}-${day}` : new Date().toISOString().slice(0, 10);
 }
 
+function ilikeContainsPattern(raw: string): string {
+  const t = raw.trim();
+  const escaped = t.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+  return `%${escaped}%`;
+}
+
+/** Ocultar concluídas = excluir apenas concluído/cancelado (igual ao admin), sem whitelist de status. */
+
+function applyOcultarConcluidasFilter(filters: ListDemandasFiltersDto): boolean {
+  return (
+    filters.ocultarConcluidas === true &&
+    !filters.status?.trim() &&
+    filters.condicaoPrazo !== 'finalizada'
+  );
+}
+
 function mapDemandaList(row: any, criador?: any, responsaveis?: any[], setores?: any[], clientes?: any[]) {
   if (!row) return null;
   const resolvidoEm = toDateISO(row.resolvido_em);
@@ -1901,6 +1917,15 @@ export class DemandasService {
       const set = new Set((data ?? []).map((d: any) => d.id));
       ids = ids.filter((id: string) => set.has(id));
     }
+    if (applyOcultarConcluidasFilter(filters)) {
+      const { data } = await sb
+        .from('Demanda')
+        .select('id')
+        .neq('status', 'concluido')
+        .neq('status', 'cancelado');
+      const set = new Set((data ?? []).map((d: any) => d.id));
+      ids = ids.filter((id: string) => set.has(id));
+    }
     if (filters.responsavelPrincipalId) {
       let query = sb
         .from('demanda_responsavel')
@@ -1924,7 +1949,7 @@ export class DemandasService {
       ids = ids.filter((id: string) => recSet.has(id));
     }
     if (filters.pesquisarTarefaOuObservacao) {
-      const term = `%${filters.pesquisarTarefaOuObservacao}%`;
+      const term = ilikeContainsPattern(filters.pesquisarTarefaOuObservacao);
       const [sub, obs] = await Promise.all([
         sb.from('subtarefa').select('demanda_id').ilike('titulo', term),
         sb.from('observacao').select('demanda_id').ilike('texto', term),
@@ -1962,9 +1987,9 @@ export class DemandasService {
       .in('id', ids)
       .order('created_at', { ascending: false })
       .range(offset, offset + pageSize - 1);
-    if (filters.assunto) q = q.ilike('assunto', `%${filters.assunto}%`);
+    if (filters.assunto) q = q.ilike('assunto', ilikeContainsPattern(filters.assunto));
     if (filters.status) q = q.eq('status', filters.status);
-    if (filters.protocolo) q = q.ilike('protocolo', `%${filters.protocolo}%`);
+    if (filters.protocolo) q = q.ilike('protocolo', ilikeContainsPattern(filters.protocolo));
     if (filters.prioridade !== undefined) q = q.eq('prioridade', filters.prioridade);
     if (filters.criadorId) q = q.eq('criador_id', filters.criadorId);
     if (filters.prazoDe) q = q.gte('prazo', filters.prazoDe);
@@ -1979,6 +2004,9 @@ export class DemandasService {
     if (filters.condicaoPrazo === 'finalizada') q = q.in('status', ['concluido', 'cancelado']);
     if (filters.dataCriacaoDe) q = q.gte('created_at', filters.dataCriacaoDe);
     if (filters.dataCriacaoAte) q = q.lte('created_at', filters.dataCriacaoAte);
+    if (applyOcultarConcluidasFilter(filters)) {
+      q = q.neq('status', 'concluido').neq('status', 'cancelado');
+    }
 
     const { data: rows, count: total } = await q;
     const relationMaps = await this.loadDemandaRelationsBatch(rows ?? [], false);
@@ -2002,7 +2030,13 @@ export class DemandasService {
   }
 
   async list(userId: string, filters: ListDemandasFiltersDto) {
-    if (filters.responsavelPrincipalId || (filters.ocultarStandby && filters.status !== 'standby') || filters.anexos) {
+    const needsVisibleIdPrefetch =
+      !!filters.responsavelPrincipalId ||
+      (filters.ocultarStandby === true && filters.status !== 'standby') ||
+      !!filters.anexos ||
+      applyOcultarConcluidasFilter(filters);
+
+    if (needsVisibleIdPrefetch) {
       const { ids, pesquisaEvidence } = await this.resolveFilteredIds(userId, filters, 'all');
       if (!ids.length) {
         return { data: [], total: 0 };
@@ -2217,12 +2251,15 @@ export class DemandasService {
         file.mimetype || 'application/octet-stream',
       );
       const sb = this.supabase.getClient();
+      // Preserva o nome original do arquivo enviado pelo usuário; o legado pode sanitizar
+      // (ex.: trocar acentos/espaços por underline), mas isso só vale para o storage_path.
+      const preservedFilename = file.originalname || legacy.filename || 'file';
       const { data, error } = await sb
         .from('anexo')
         .insert({
           demanda_id: demandaId,
-          filename: legacy.filename || file.originalname || 'file',
-          mime_type: file.mimetype || this.guessMimeType(legacy.filename),
+          filename: preservedFilename,
+          mime_type: file.mimetype || this.guessMimeType(preservedFilename),
           size: file.size,
           storage_path: legacy.storagePath,
         })
@@ -2641,7 +2678,11 @@ export class DemandasService {
   }
 
   async exportExcel(userId: string, filters: ListDemandasFiltersDto) {
-    const needsPrefilter = filters.pesquisaGeral?.trim() || filters.responsavelPrincipalId || (filters.ocultarStandby && filters.status !== 'standby');
+    const needsPrefilter =
+      !!filters.pesquisaGeral?.trim() ||
+      !!filters.responsavelPrincipalId ||
+      (filters.ocultarStandby === true && filters.status !== 'standby') ||
+      applyOcultarConcluidasFilter(filters);
     const prefilteredIds = needsPrefilter
       ? (await this.resolveFilteredIds(userId, filters, 'all')).ids
       : null;
@@ -2667,7 +2708,10 @@ export class DemandasService {
     if (ids.length === 0) return [];
     let q = sb.from('Demanda').select('*').in('id', ids).order('created_at', { ascending: false }).limit(10000);
     if (filters.status) q = q.eq('status', filters.status);
-    if (filters.assunto) q = q.ilike('assunto', `%${filters.assunto}%`);
+    if (applyOcultarConcluidasFilter(filters)) {
+      q = q.neq('status', 'concluido').neq('status', 'cancelado');
+    }
+    if (filters.assunto) q = q.ilike('assunto', ilikeContainsPattern(filters.assunto));
     const { data: rows } = await q;
     const relationMaps = await this.loadDemandaRelationsBatch(rows ?? [], false);
     const result = [];
@@ -2709,6 +2753,7 @@ export class DemandasService {
     append('assunto', filters.assunto);
     append('status', filters.status);
     append('ocultarStandby', filters.ocultarStandby);
+    append('ocultarConcluidas', filters.ocultarConcluidas);
     append('tipoRecorrencia', filters.tipoRecorrencia);
     append('protocolo', filters.protocolo);
     append('prioridade', filters.prioridade);

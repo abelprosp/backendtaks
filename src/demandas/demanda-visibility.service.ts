@@ -33,24 +33,37 @@ export class DemandaVisibilityService {
     this.visibleIdsCache.clear();
   }
 
-  async canViewDemanda(userId: string, demandaId: string, criadorId?: string | null): Promise<boolean> {
+  async canViewDemanda(userId: string, demandaId: string, _criadorId?: string | null): Promise<boolean> {
     if (await this.isAdmin(userId)) return true;
 
     const sb = this.supabase.getClient();
-    const demandaCriadorId =
-      criadorId ??
-      (
-        await sb.from('Demanda').select('criador_id').eq('id', demandaId).single()
-      ).data?.criador_id;
-    if (!demandaCriadorId) return false;
-    if (demandaCriadorId === userId) return true;
+    const { data: row } = await sb
+      .from('Demanda')
+      .select('criador_id, is_privada, private_owner_user_id')
+      .eq('id', demandaId)
+      .maybeSingle();
+    if (!row) return false;
 
-    const [respRes, setoresRes] = await Promise.all([
+    if (!row.is_privada) return true;
+
+    if (row.criador_id === userId || row.private_owner_user_id === userId) return true;
+
+    const { data: privView } = await sb
+      .from('demanda_private_viewer')
+      .select('demanda_id')
+      .eq('demanda_id', demandaId)
+      .eq('user_id', userId)
+      .limit(1);
+    if (privView?.length) return true;
+
+    const [respRes, setoresRes, subtarefaRes] = await Promise.all([
       sb.from('demanda_responsavel').select('user_id').eq('demanda_id', demandaId),
       sb.from('demanda_setor').select('setor_id').eq('demanda_id', demandaId),
+      sb.from('subtarefa').select('demanda_id').eq('demanda_id', demandaId).eq('responsavel_user_id', userId).limit(1),
     ]);
-    const resp = respRes.data;
-    if (resp?.some((r: any) => r.user_id === userId)) return true;
+    if (respRes.data?.some((r: any) => r.user_id === userId)) return true;
+    if (subtarefaRes.data?.length) return true;
+
     const setorIds = (setoresRes.data ?? []).map((s: any) => s.setor_id);
     if (setorIds.length === 0) return false;
     const { data: perm } = await sb
@@ -75,10 +88,12 @@ export class DemandaVisibilityService {
       if (rpcIds) return [...new Set(rpcIds)];
 
       const sb = this.supabase.getClient();
-      const [asCriador, asResponsavel, bySetor] = await Promise.all([
+      const [asCriador, asResponsavel, bySetor, asSubtarefa, todasPublicas] = await Promise.all([
         sb.from('Demanda').select('id').eq('criador_id', userId),
         sb.from('demanda_responsavel').select('demanda_id').eq('user_id', userId),
         sb.from('user_setor_permissao').select('setor_id').eq('user_id', userId).eq('can_view', true),
+        sb.from('subtarefa').select('demanda_id').eq('responsavel_user_id', userId),
+        sb.from('Demanda').select('id').or('is_privada.is.null,is_privada.eq.false'),
       ]);
       const setorIds = (bySetor.data ?? []).map((s: any) => s.setor_id);
       let bySetorDemandas: { demanda_id: string }[] = [];
@@ -89,7 +104,9 @@ export class DemandaVisibilityService {
       const ids = new Set<string>();
       (asCriador.data ?? []).forEach((d: any) => ids.add(d.id));
       (asResponsavel.data ?? []).forEach((d: any) => ids.add(d.demanda_id));
+      (asSubtarefa.data ?? []).forEach((d: any) => ids.add(d.demanda_id));
       bySetorDemandas.forEach((d: any) => ids.add(d.demanda_id));
+      (todasPublicas.data ?? []).forEach((d: any) => ids.add(d.id));
       return Array.from(ids);
     });
   }

@@ -13,6 +13,7 @@ async function bootstrapExpressApp() {
   const expressApp = expressFactory();
   const nestApp = await NestFactory.create(AppModule, new ExpressAdapter(expressApp), {
     bufferLogs: true,
+    bodyParser: false,
   });
   await configureApp(nestApp);
 

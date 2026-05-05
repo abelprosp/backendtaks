@@ -27,6 +27,20 @@ public sealed class DemandaVisibilityService
                 .ToArray();
         }
 
+        try
+        {
+            var rpcRows = await _supabase.RpcAsync<JsonElement[]>("rpc_visible_demanda_ids", new { p_user_id = userId }, cancellationToken);
+            return rpcRows
+                .Where(row => row.ValueKind == JsonValueKind.Object)
+                .Select(row => row.TryGetProperty("demanda_id", out var pid) ? (pid.GetString() ?? "") : "")
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+        }
+        catch
+        {
+        }
+
         var asCriadorTask = _supabase.QueryAllRowsAsync(
             $"Demanda?select=id&criador_id=eq.{Uri.EscapeDataString(userId)}",
             cancellationToken);
@@ -98,14 +112,19 @@ public sealed class DemandaVisibilityService
             return false;
         }
 
+        if (await IsAdminAsync(userId, cancellationToken))
+        {
+            return true;
+        }
+
         var canViewAllPrivateDemandas = await CanManagePrivateDemandasAsync(userId, cancellationToken);
-        var privateViewerIds = await LoadPrivateViewerDemandIdsAsync(userId, cancellationToken);
-        if (!IsDemandVisibleToUser(demanda.Value, userId, canViewAllPrivateDemandas, privateViewerIds))
+        var privateViewerDemandaIds = await LoadPrivateViewerDemandIdsAsync(userId, cancellationToken);
+        if (!IsDemandVisibleToUser(demanda.Value, userId, canViewAllPrivateDemandas, privateViewerDemandaIds))
         {
             return false;
         }
 
-        if (await IsAdminAsync(userId, cancellationToken))
+        if (!demanda.Value.GetBooleanOrDefault("is_privada"))
         {
             return true;
         }

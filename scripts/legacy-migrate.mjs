@@ -31,6 +31,11 @@ const DEFAULT_OPTIONS = {
   forceAnexos: false,
   syncStatuses: false,
   syncStatusesOnly: false,
+  statusFinalOnly: false,
+  protectTodayUpdates: false,
+  checkPending: false,
+  fromLegacyFinals: false,
+  importOrphans: false,
   writeSnapshot: true,
 };
 
@@ -218,9 +223,28 @@ function parseArgs(argv) {
     if (arg === '--sync-statuses-only') {
       options.syncStatuses = true;
       options.syncStatusesOnly = true;
-      options.apply = true;
       options.phases = new Set(['demandas']);
       options.writeSnapshot = false;
+      continue;
+    }
+    if (arg === '--final-only') {
+      options.statusFinalOnly = true;
+      continue;
+    }
+    if (arg === '--protect-today') {
+      options.protectTodayUpdates = true;
+      continue;
+    }
+    if (arg === '--check-pending') {
+      options.checkPending = true;
+      continue;
+    }
+    if (arg === '--from-legacy-finals') {
+      options.fromLegacyFinals = true;
+      continue;
+    }
+    if (arg === '--import-orphans') {
+      options.importOrphans = true;
       continue;
     }
     if (arg === '--no-snapshot') {
@@ -1939,36 +1963,135 @@ async function backfillMappedDemandAttachments(context, legacy, options) {
   });
 }
 
+function getTodayIsoSaoPaulo() {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  });
+  const parts = formatter.formatToParts(new Date());
+  const y = parts.find((p) => p.type === 'year')?.value ?? '';
+  const m = parts.find((p) => p.type === 'month')?.value ?? '';
+  const d = parts.find((p) => p.type === 'day')?.value ?? '';
+  return y && m && d ? `${y}-${m}-${d}` : new Date().toISOString().slice(0, 10);
+}
+
+const FINAL_LEGACY_STATUSES = new Set(['concluido', 'cancelado']);
+
 async function syncMappedDemandaStatuses(context, summaries) {
-  const existingSummaries = summaries.filter((item) => item.legacyId && context.map.demandas[item.legacyId]);
-  console.log(`demandas importadas encontradas no legado para conferir status: ${existingSummaries.length}`);
-  let checked = 0;
-  let updated = 0;
-  for (const summary of existingSummaries) {
-    const demandaId = context.map.demandas[summary.legacyId];
-    const legacyStatus = mapLegacyStatus(summary.status);
-    if (!demandaId || !legacyStatus) continue;
-    checked += 1;
-    const rows = await context.supabase.select(
-      `Demanda?select=id,status&legacy_id=eq.${encodeEq(summary.legacyId)}&limit=1`,
-    ).catch(() => []);
-    const row = Array.isArray(rows) ? rows[0] : null;
-    const currentStatus = row?.status;
-    if (!currentStatus || currentStatus === legacyStatus) continue;
-    await context.supabase.patch(
-      'Demanda',
-      `id=eq.${encodeEq(demandaId)}`,
-      {
-        status: legacyStatus,
-        resolvido_em: legacyStatus === 'concluido' ? new Date().toISOString() : null,
-        updated_at: new Date().toISOString(),
-      },
-      { select: 'id,status' },
-    );
-    updated += 1;
-    console.log(`status atualizado demanda ${summary.legacyId}: ${currentStatus} -> ${legacyStatus}`);
+  const opts = context.options || {};
+  const apply = opts.apply === true;
+  const finalOnly = opts.statusFinalOnly === true;
+  const protectToday = opts.protectTodayUpdates === true;
+  const todayStartIso = `${getTodayIsoSaoPaulo()}T00:00:00`;
+
+  console.log(`demandas no legado para conferir status: ${summaries.length}`);
+  console.log(`modo: ${apply ? 'APPLY' : 'DRY-RUN'} | finalOnly=${finalOnly} | protectToday=${protectToday} | hoje(SP)=${todayStartIso}`);
+
+  context.orphanLegacyIds = [];
+
+  // Otimização: ao invés de 1 query por demanda no Supabase, fazemos batch SELECT
+  // legacy_id=in.(id1,...,idN). Em seguida cruzamos em memória.
+  const validSummaries = summaries.filter((s) => {
+    if (!s.legacyId) return false;
+    const ls = mapLegacyStatus(s.status);
+    return finalOnly ? FINAL_LEGACY_STATUSES.has(ls) : Boolean(ls);
+  });
+  const skippedFinalOnly = summaries.length - validSummaries.length;
+
+  const BATCH = 200;
+  const rowByLegacyId = new Map();
+  for (let i = 0; i < validSummaries.length; i += BATCH) {
+    const slice = validSummaries.slice(i, i + BATCH);
+    const ids = slice.map((s) => `"${String(s.legacyId).replace(/"/g, '\\"')}"`).join(',');
+    const url = `Demanda?select=id,legacy_id,status,updated_at,resolvido_em&legacy_id=in.(${ids})&limit=${slice.length}`;
+    const rows = await context.supabase.select(url).catch(() => []);
+    for (const row of rows ?? []) {
+      const lid = String(row.legacy_id ?? '');
+      if (lid) rowByLegacyId.set(lid, row);
+    }
+    console.log(`  cruzando lote ${Math.floor(i / BATCH) + 1}/${Math.ceil(validSummaries.length / BATCH)} (rows acumuladas: ${rowByLegacyId.size})`);
   }
-  console.log(`sincronização de status: ${checked} conferidas, ${updated} atualizadas.`);
+
+  let checked = 0;
+  let needsUpdate = 0;
+  let updated = 0;
+  let skippedProtectToday = 0;
+  let skippedSameStatus = 0;
+  let skippedAlreadyFinalized = 0;
+  let notFoundInNew = 0;
+  const samples = [];
+  const updatesPlanned = [];
+
+  for (const summary of validSummaries) {
+    const legacyStatus = mapLegacyStatus(summary.status);
+    const row = rowByLegacyId.get(String(summary.legacyId));
+    if (!row) {
+      notFoundInNew += 1;
+      context.orphanLegacyIds.push({ legacyId: summary.legacyId, summary });
+      continue;
+    }
+    checked += 1;
+    const currentStatus = row.status;
+    const demandaId = row.id;
+    if (!currentStatus) continue;
+    if (currentStatus === legacyStatus) { skippedSameStatus += 1; continue; }
+    if (FINAL_LEGACY_STATUSES.has(currentStatus) && finalOnly) { skippedAlreadyFinalized += 1; continue; }
+
+    if (protectToday && row.updated_at && String(row.updated_at) >= todayStartIso) {
+      skippedProtectToday += 1;
+      continue;
+    }
+
+    needsUpdate += 1;
+    if (samples.length < 15) {
+      samples.push({ legacyId: summary.legacyId, demandaId, from: currentStatus, to: legacyStatus, updated_at: row.updated_at });
+    }
+    if (apply) {
+      updatesPlanned.push({ demandaId, legacyId: summary.legacyId, currentStatus, legacyStatus, resolvidoEmAtual: row.resolvido_em ?? null });
+    }
+  }
+
+  if (apply && updatesPlanned.length) {
+    console.log(`aplicando ${updatesPlanned.length} updates...`);
+    let count = 0;
+    for (const item of updatesPlanned) {
+      const patchBody = {
+        status: item.legacyStatus,
+        resolvido_em: item.legacyStatus === 'concluido' ? new Date().toISOString() : (item.legacyStatus === 'cancelado' ? item.resolvidoEmAtual ?? null : null),
+        updated_at: new Date().toISOString(),
+      };
+      await context.supabase.patch('Demanda', `id=eq.${encodeEq(item.demandaId)}`, patchBody, { select: 'id,status' });
+      count += 1;
+      if (count <= 20 || count % 50 === 0) {
+        console.log(`  ${count}/${updatesPlanned.length}  ${item.legacyId}: ${item.currentStatus} -> ${item.legacyStatus}`);
+      }
+    }
+    updated = count;
+  }
+
+  if (notFoundInNew > 0 && context.orphanLegacyIds?.length) {
+    console.log('');
+    console.log('Órfãos (no legado mas não no novo):');
+    for (const o of context.orphanLegacyIds) {
+      console.log(`   - ${o.legacyId} | ${o.summary?.protocolo ?? ''} | ${o.summary?.assunto ?? ''} | status=${o.summary?.status ?? ''}`);
+    }
+  }
+
+  console.log('');
+  console.log('--- Resumo da sincronização de status ---');
+  console.log(`  total recebidas do legado: ${summaries.length}`);
+  console.log(`  ignoradas (não final, finalOnly): ${skippedFinalOnly}`);
+  console.log(`  não encontradas no novo (sem legacy_id mapeado): ${notFoundInNew}`);
+  console.log(`  encontradas/conferidas no novo: ${checked}`);
+  console.log(`  ignoradas (status já igual): ${skippedSameStatus}`);
+  console.log(`  ignoradas (já finalizada no novo): ${skippedAlreadyFinalized}`);
+  console.log(`  ignoradas (atualizada hoje, protectToday): ${skippedProtectToday}`);
+  console.log(`  precisariam mudar: ${needsUpdate}`);
+  console.log(`  efetivamente atualizadas: ${apply ? updated : 0}`);
+  if (samples.length) {
+    console.log('  amostra:');
+    for (const s of samples) console.log('   -', JSON.stringify(s));
+  }
 }
 
 async function importTemplates(context, templates) {
@@ -2291,16 +2414,129 @@ async function main() {
     snapshot.templates = await collectLegacyTemplates(legacy, options);
   }
 
+  if (options.syncStatusesOnly && options.fromLegacyFinals) {
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      throw new Error('SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY são obrigatórios para --sync-statuses-only.');
+    }
+    const supabase = new SupabaseRestClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+    console.log('modo --from-legacy-finals: lendo do legado todas as demandas Concluido/Cancelado...');
+    console.log(`flags: apply=${options.apply} importOrphans=${options.importOrphans} finalOnly=${options.statusFinalOnly} protectToday=${options.protectTodayUpdates}`);
+    const collectedSummaries = [];
+    for (const statusLegacy of ['Concluido', 'Cancelado']) {
+      console.log(`  buscando status="${statusLegacy}"...`);
+      const indexPage = await legacy.get('/painel/demandas');
+      const csrf = extractInputValue(indexPage, '_token');
+      const firstSearch = await legacy.postForm('/painel/demandas/pesquisar', {
+        ...buildDemandSearchPayload(csrf, options),
+        status: statusLegacy,
+      });
+      const totalPages = parsePaginationMax(firstSearch);
+      console.log(`    paginas detectadas: ${totalPages}`);
+      const pages = limitArray(Array.from({ length: totalPages }, (_, i) => i + 1), options.limitDemandPages);
+      const htmlPages = await mapConcurrent(pages, options.concurrency, async (page) => {
+        if (page === 1) return firstSearch;
+        const params = new URLSearchParams({
+          assunto: '', criador: '', tipo: '', status: statusLegacy, resp: '',
+          di_dem: formatLegacyDate(options.demandDateFrom),
+          df_dem: formatLegacyDate(options.demandDateTo),
+          prazo_di_dem: '', prazo_df_dem: '', setor: '', cliente: '',
+          condicao: '', protocolo: '', tarefa: '', obs: '', prioridade: '',
+          resp_principal: '', page: String(page),
+        });
+        return legacy.get(`/painel/demandas/pesquisar?${params.toString()}`);
+      });
+      const parsed = htmlPages.flatMap(parseLegacyDemandSearchPage);
+      console.log(`    coletadas: ${parsed.length}`);
+      collectedSummaries.push(...parsed);
+    }
+    demandSummaries = dedupeBy(collectedSummaries, (item) => item.legacyId);
+    console.log(`total finalizadas no legado: ${demandSummaries.length}`);
+    const syncContext = { supabase, map: existingMap, options };
+    await syncMappedDemandaStatuses(syncContext, demandSummaries);
+
+    if (options.importOrphans && Array.isArray(syncContext.orphanLegacyIds) && syncContext.orphanLegacyIds.length > 0) {
+      console.log('');
+      console.log(`importando ${syncContext.orphanLegacyIds.length} demanda(s) órfã(s) (existem no legado, faltam no novo)...`);
+      console.log('  ids:', syncContext.orphanLegacyIds.map((o) => o.legacyId).join(', '));
+
+      if (!options.apply) {
+        console.log('  (dry-run: nada será gravado. Reexecute com --apply para importar.)');
+        return;
+      }
+
+      console.log('  coletando usuários do legado para mapeamento...');
+      const usersSnapshot = await collectLegacyUsers(legacy, options);
+      const reference = await loadReferenceData(supabase);
+      const userDirectory = buildUserDirectory(usersSnapshot);
+      const warnings = [];
+      const importContext = {
+        supabase, reference, map: existingMap, userDirectory, warnings, legacy, options,
+        anexosBucket: null, anexosBucketReady: false,
+      };
+      importContext.migrationUserId = await ensureMigrationUser(importContext);
+
+      console.log('  coletando detalhes dos órfãos no legado...');
+      const orphanSummaries = syncContext.orphanLegacyIds.map((o) => o.summary).filter(Boolean);
+      const details = await collectLegacyDemandDetails(legacy, orphanSummaries, options);
+      await importDemandas(importContext, details, options);
+
+      if (warnings.length) {
+        console.log('  avisos:');
+        for (const w of warnings) console.log('   -', w);
+      }
+      console.log(`  importação dos órfãos concluída.`);
+    }
+    return;
+  }
+
+  if (options.syncStatusesOnly && options.checkPending) {
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      throw new Error('SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY são obrigatórios para --sync-statuses-only.');
+    }
+    const supabase = new SupabaseRestClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+    console.log('modo --check-pending: lendo demandas não-finalizadas com legacy_id no Supabase...');
+    const pending = await supabase.select(
+      'Demanda?select=id,legacy_id,status,updated_at&status=in.(em_aberto,em_andamento,standby)&legacy_id=not.is.null&limit=10000',
+    );
+    console.log(`demandas não-finalizadas com legacy_id encontradas: ${pending.length}`);
+    demandSummaries = await mapConcurrent(pending, options.concurrency, async (row, index) => {
+      if ((index + 1) % 50 === 0 || index === pending.length - 1) {
+        console.log(`  ...checando ${index + 1}/${pending.length} no legado`);
+      }
+      try {
+        const html = await legacy.get(`/painel/demandas/editar/${row.legacy_id}`);
+        const statusLegacy = extractSelectValue(html, 'status');
+        return { legacyId: row.legacy_id, status: statusLegacy || '' };
+      } catch (err) {
+        console.warn(`  ! falha ao ler legado ${row.legacy_id}: ${err?.message || err}`);
+        return null;
+      }
+    });
+    demandSummaries = demandSummaries.filter(Boolean);
+    console.log(`detalhes lidos do legado: ${demandSummaries.length}`);
+    await syncMappedDemandaStatuses({ supabase, map: existingMap, options }, demandSummaries);
+    return;
+  }
+
   if (options.phases.has('demandas')) {
     console.log('coletando listagem de demandas do legado...');
     demandSummaries = await collectLegacyDemandSummaries(legacy, options);
     pendingDemandSummaries = demandSummaries.filter((item) => !existingMap.demandas[item.legacyId]);
     console.log(`resumos de demandas coletados: ${demandSummaries.length}`);
     console.log(`demandas pendentes para importar neste lote: ${pendingDemandSummaries.length}`);
-    if (!options.apply) {
+    if (!options.apply && !options.syncStatusesOnly) {
       console.log('coletando detalhes das demandas...');
       snapshot.demandas = await collectLegacyDemandDetails(legacy, pendingDemandSummaries, options);
     }
+  }
+
+  if (options.syncStatusesOnly) {
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      throw new Error('SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY são obrigatórios para --sync-statuses-only.');
+    }
+    const supabase = new SupabaseRestClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+    await syncMappedDemandaStatuses({ supabase, map: existingMap, options }, demandSummaries);
+    return;
   }
 
   if (options.writeSnapshot) await saveSnapshot(snapshot);
@@ -2321,10 +2557,6 @@ async function main() {
   }
 
   const supabase = new SupabaseRestClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-  if (options.syncStatusesOnly) {
-    await syncMappedDemandaStatuses({ supabase, map: existingMap }, demandSummaries);
-    return;
-  }
 
   const reference = await loadReferenceData(supabase);
   const map = existingMap;

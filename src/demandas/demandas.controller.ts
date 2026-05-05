@@ -72,6 +72,7 @@ export class DemandasController {
       ...query,
       prioridade: stringToBool(query.prioridade),
       ocultarStandby: stringToBool(query.ocultarStandby),
+      ocultarConcluidas: stringToBool(query.ocultarConcluidas),
       responsavelApenasPrincipal: stringToBool(query.responsavelApenasPrincipal),
     } as ListDemandasFiltersDto;
     return this.demandasService.list(req.user.id, filters);
@@ -87,6 +88,7 @@ export class DemandasController {
       ...query,
       prioridade: stringToBool(query.prioridade),
       ocultarStandby: stringToBool(query.ocultarStandby),
+      ocultarConcluidas: stringToBool(query.ocultarConcluidas),
       responsavelApenasPrincipal: stringToBool(query.responsavelApenasPrincipal),
     } as ListDemandasFiltersDto;
     const data = await this.demandasService.exportExcel(req.user.id, filters);

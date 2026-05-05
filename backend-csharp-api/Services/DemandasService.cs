@@ -3294,8 +3294,15 @@ public sealed class DemandasService
         && !string.IsNullOrWhiteSpace(value)
         && source.Contains(value, StringComparison.OrdinalIgnoreCase);
 
-    private static string BuildIlikeValue(string raw) =>
-        Uri.EscapeDataString($"*{raw.Trim()}*");
+    private static string BuildIlikeValue(string raw)
+    {
+        var trimmed = raw.Trim();
+        var escaped = trimmed
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("%", "\\%", StringComparison.Ordinal)
+            .Replace("_", "\\_", StringComparison.Ordinal);
+        return Uri.EscapeDataString($"%{escaped}%");
+    }
 
     private static bool IsUuid(string? value) =>
         !string.IsNullOrWhiteSpace(value) && Guid.TryParse(value, out _);

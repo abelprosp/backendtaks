@@ -6,7 +6,7 @@ import { APP_NAME, getNodeEnv, getPort } from './common/runtime-config';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  const app = await NestFactory.create(AppModule, { bufferLogs: true, bodyParser: false });
   const { allowedOrigins } = await configureApp(app);
 
   const port = getPort();
