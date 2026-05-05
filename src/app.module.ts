@@ -9,6 +9,7 @@ import { DemandasModule } from './demandas/demandas.module';
 import { TemplatesModule } from './templates/templates.module';
 import { HealthModule } from './health/health.module';
 import { IaContextModule } from './ia-context/ia-context.module';
+import { AssistenteModule } from './assistente/assistente.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { IaContextModule } from './ia-context/ia-context.module';
     TemplatesModule,
     HealthModule,
     IaContextModule,
+    AssistenteModule,
   ],
 })
 export class AppModule {}

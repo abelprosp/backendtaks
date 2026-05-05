@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import OpenAI from 'openai';
+import * as os from 'os';
 import * as path from 'path';
 import mammoth from 'mammoth';
 
@@ -23,7 +24,8 @@ type IaContextRecord = {
 @Injectable()
 export class IaContextService {
   private readonly maxFileSizeBytes = 10 * 1024 * 1024;
-  private readonly baseDir = path.join(process.cwd(), 'uploads', 'ia-context');
+  private readonly baseDir = process.env.IA_CONTEXT_DIR
+    || path.join(os.tmpdir(), 'luxus-demandas', 'ia-context');
   private readonly storageFile = path.join(this.baseDir, 'knowledge.json');
   private readonly allowedExtensions = ['.pdf', '.txt', '.docx', '.png', '.jpg', '.jpeg', '.webp'];
 
