@@ -1,0 +1,45 @@
+services:
+  - type: web
+    name: luxus-demandas-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: NODE_ENV
+        value: production
+      - key: FRONTEND_URL
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 30d
+      - key: REFRESH_EXPIRES_IN
+        value: 365d
+      - key: SUPABASE_STORAGE_BUCKET
+        value: demandas-anexos
+      - key: LEGACY_BASE_URL
+        value: http://luxusweb.com.br
+      - key: LEGACY_EMAIL
+        sync: false
+      - key: LEGACY_PASSWORD
+        sync: false
+      - key: PREFER_LEGACY_ATTACHMENTS
+        value: true
+      - key: REQUIRE_LEGACY_ATTACHMENTS
+        value: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4.1-mini
