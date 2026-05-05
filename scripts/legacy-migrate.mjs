@@ -22,6 +22,8 @@ const DEFAULT_OPTIONS = {
   limitDemandPages: null,
   limitDemands: null,
   demandIds: null,
+  demandDateFrom: null,
+  demandDateTo: null,
   demandBatchSize: 100,
   concurrency: 4,
   skipAnexos: false,
@@ -179,6 +181,14 @@ function parseArgs(argv) {
         .filter(Boolean);
       continue;
     }
+    if (arg.startsWith('--demand-date-from=')) {
+      options.demandDateFrom = parseCliDate(arg.slice('--demand-date-from='.length));
+      continue;
+    }
+    if (arg.startsWith('--demand-date-to=')) {
+      options.demandDateTo = parseCliDate(arg.slice('--demand-date-to='.length));
+      continue;
+    }
     if (arg.startsWith('--demand-batch-size=')) {
       options.demandBatchSize = Math.max(1, Number.parseInt(arg.slice('--demand-batch-size='.length), 10) || 1);
       continue;
@@ -211,6 +221,23 @@ function toNullableInt(value) {
   if (!value || value === 'all' || value === 'null') return null;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseCliDate(value) {
+  const normalized = normalizeWhitespace(value);
+  if (!normalized) return null;
+  const iso = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const br = normalized.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (br) return `${br[3]}-${br[2]}-${br[1]}`;
+  throw new Error(`Data inválida: ${value}. Use YYYY-MM-DD ou DD/MM/YYYY.`);
+}
+
+function formatLegacyDate(value) {
+  if (!value) return '';
+  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return '';
+  return `${match[1]}-${match[2]}-${match[3]}`;
 }
 
 function decodeHtml(text) {
@@ -930,15 +957,38 @@ function encodeEq(value) {
   return encodeURIComponent(String(value));
 }
 
-function buildBlankDemandSearchQuery(page = 1) {
+function buildDemandSearchPayload(csrf, options = DEFAULT_OPTIONS) {
+  return {
+    _token: csrf,
+    cliente: '',
+    assunto: '',
+    status: '',
+    tipo: '',
+    protocolo: '',
+    prioridade: '',
+    criador: '',
+    resp: '',
+    resp_principal: '',
+    setor: '',
+    condicao: '',
+    tarefa: '',
+    obs: '',
+    di_dem: formatLegacyDate(options.demandDateFrom),
+    df_dem: formatLegacyDate(options.demandDateTo),
+    prazo_di_dem: '',
+    prazo_df_dem: '',
+  };
+}
+
+function buildDemandSearchQuery(page = 1, options = DEFAULT_OPTIONS) {
   const params = new URLSearchParams({
     assunto: '',
     criador: '',
     tipo: '',
     status: '',
     resp: '',
-    di_dem: '',
-    df_dem: '',
+    di_dem: formatLegacyDate(options.demandDateFrom),
+    df_dem: formatLegacyDate(options.demandDateTo),
     prazo_di_dem: '',
     prazo_df_dem: '',
     setor: '',
@@ -952,6 +1002,21 @@ function buildBlankDemandSearchQuery(page = 1) {
     page: String(page),
   });
   return `/painel/demandas/pesquisar?${params.toString()}`;
+}
+
+function isDateInRange(value, from, to) {
+  if (!value) return false;
+  const date = String(value).slice(0, 10);
+  if (from && date < from) return false;
+  if (to && date > to) return false;
+  return true;
+}
+
+function filterDemandSummariesByDate(summaries, options) {
+  if (!options.demandDateFrom && !options.demandDateTo) return summaries;
+  return summaries.filter((item) =>
+    isDateInRange(item.dataAbertura, options.demandDateFrom, options.demandDateTo)
+    || isDateInRange(item.listCreatedAt, options.demandDateFrom, options.demandDateTo));
 }
 
 function parseLegacyUsersPage(html) {
@@ -1360,33 +1425,17 @@ async function collectLegacyTemplates(session, options) {
 async function collectLegacyDemandSummaries(session, options) {
   const demandIndex = await session.get('/painel/demandas');
   const csrf = extractInputValue(demandIndex, '_token');
-  const firstSearch = await session.postForm('/painel/demandas/pesquisar', {
-    _token: csrf,
-    cliente: '',
-    assunto: '',
-    status: '',
-    tipo: '',
-    protocolo: '',
-    prioridade: '',
-    criador: '',
-    resp: '',
-    resp_principal: '',
-    setor: '',
-    condicao: '',
-    tarefa: '',
-    obs: '',
-    di_dem: '',
-    df_dem: '',
-    prazo_di_dem: '',
-    prazo_df_dem: '',
-  });
+  const firstSearch = await session.postForm('/painel/demandas/pesquisar', buildDemandSearchPayload(csrf, options));
   const totalPages = parsePaginationMax(firstSearch);
   const pages = limitArray(Array.from({ length: totalPages }, (_, index) => index + 1), options.limitDemandPages);
   const htmlPages = await mapConcurrent(pages, options.concurrency, async (page) => {
     if (page === 1) return firstSearch;
-    return session.get(buildBlankDemandSearchQuery(page));
+    return session.get(buildDemandSearchQuery(page, options));
   });
-  return dedupeBy(htmlPages.flatMap(parseLegacyDemandSearchPage), (item) => item.legacyId);
+  return filterDemandSummariesByDate(
+    dedupeBy(htmlPages.flatMap(parseLegacyDemandSearchPage), (item) => item.legacyId),
+    options,
+  );
 }
 
 async function collectLegacyDemandDetails(session, summaries, options, progress = {}) {
