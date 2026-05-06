@@ -661,6 +661,11 @@ as $$
     select status, count(*)::int as total
     from base
     group by status
+  ),
+  active_base as (
+    select *
+    from base
+    where status in ('em_aberto', 'em_andamento', 'standby')
   )
   select
     count(*)::int as total_demandas,
@@ -673,13 +678,13 @@ as $$
         else null
       end
     )::numeric, 1) as tempo_medio_resolucao_horas,
-    count(*) filter (
-      where ultima_observacao_em is null
-         or now() - ultima_observacao_em > interval '7 days'
-    )::int as demandas_sem_observacao_recente,
+    (select count(*)::int
+     from active_base
+     where ultima_observacao_em is null
+        or now() - ultima_observacao_em > interval '7 days') as demandas_sem_observacao_recente,
     round(avg(
       case
-        when ultima_observacao_em is not null
+        when status in ('em_aberto', 'em_andamento', 'standby') and ultima_observacao_em is not null
           then extract(epoch from (now() - ultima_observacao_em)) / 3600.0
         else null
       end
