@@ -40,7 +40,6 @@ public sealed class DemandasService
 
     public async Task<object> CreateAsync(string userId, CreateDemandaRequest request, CancellationToken cancellationToken)
     {
-        var protocolo = await GerarProtocoloAsync(cancellationToken);
         var status = string.IsNullOrWhiteSpace(request.Status) ? "em_aberto" : request.Status;
         var isPrivada = request.IsPrivada == true;
         if (isPrivada && !await _visibility.CanManagePrivateDemandasAsync(userId, cancellationToken))
@@ -52,18 +51,17 @@ public sealed class DemandasService
         var responsaveis = NormalizeResponsaveis(request.Responsaveis);
         var subtarefas = NormalizeCreateSubtarefas(request.Subtarefas);
 
-        var created = await _supabase.InsertSingleAsync("Demanda", new
+        var created = await InsertDemandaWithGeneratedProtocoloAsync(new Dictionary<string, object?>
         {
-            protocolo,
-            assunto = request.Assunto,
-            prioridade = request.Prioridade ?? false,
-            prazo = request.Prazo,
-            status,
-            criador_id = userId,
-            observacoes_gerais = request.ObservacoesGerais,
-            is_recorrente = request.IsRecorrente ?? false,
-            is_privada = isPrivada,
-            private_owner_user_id = isPrivada ? userId : null,
+            ["assunto"] = request.Assunto,
+            ["prioridade"] = request.Prioridade ?? false,
+            ["prazo"] = request.Prazo,
+            ["status"] = status,
+            ["criador_id"] = userId,
+            ["observacoes_gerais"] = request.ObservacoesGerais,
+            ["is_recorrente"] = request.IsRecorrente ?? false,
+            ["is_privada"] = isPrivada,
+            ["private_owner_user_id"] = isPrivada ? userId : null,
         }, cancellationToken);
 
         var demandaId = created.GetStringOrEmpty("id");
@@ -104,7 +102,6 @@ public sealed class DemandasService
     public async Task<object> CreateFromTemplateAsync(string userId, string templateId, CreateDemandaFromTemplateRequest request, CancellationToken cancellationToken)
     {
         var template = await _templates.LoadForDemandaAsync(templateId, cancellationToken);
-        var protocolo = await GerarProtocoloAsync(cancellationToken);
         var isPrivada = request.IsPrivada == true;
         if (isPrivada && !await _visibility.CanManagePrivateDemandasAsync(userId, cancellationToken))
         {
@@ -137,18 +134,17 @@ public sealed class DemandasService
                 ResponsavelUserId = IsUuid(item.ResponsavelUserId) ? item.ResponsavelUserId : null,
             }).ToList();
 
-        var created = await _supabase.InsertSingleAsync("Demanda", new
+        var created = await InsertDemandaWithGeneratedProtocoloAsync(new Dictionary<string, object?>
         {
-            protocolo,
-            assunto = request.Assunto,
-            prioridade,
-            prazo = request.Prazo,
-            status = "em_aberto",
-            criador_id = userId,
-            observacoes_gerais = observacoesGerais,
-            is_recorrente = isRecorrente,
-            is_privada = isPrivada,
-            private_owner_user_id = isPrivada ? userId : null,
+            ["assunto"] = request.Assunto,
+            ["prioridade"] = prioridade,
+            ["prazo"] = request.Prazo,
+            ["status"] = "em_aberto",
+            ["criador_id"] = userId,
+            ["observacoes_gerais"] = observacoesGerais,
+            ["is_recorrente"] = isRecorrente,
+            ["is_privada"] = isPrivada,
+            ["private_owner_user_id"] = isPrivada ? userId : null,
         }, cancellationToken);
 
         var demandaId = created.GetStringOrEmpty("id");
@@ -1025,15 +1021,59 @@ public sealed class DemandasService
         return new { metricas };
     }
 
+    private async Task<JsonElement> InsertDemandaWithGeneratedProtocoloAsync(Dictionary<string, object?> payload, CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 8;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            payload["protocolo"] = await GerarProtocoloAsync(cancellationToken);
+            try
+            {
+                return await _supabase.InsertSingleAsync("Demanda", payload, cancellationToken);
+            }
+            catch (InvalidOperationException ex) when (IsDuplicateProtocoloError(ex) && attempt < maxAttempts - 1)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(40 * (attempt + 1)), cancellationToken);
+            }
+        }
+
+        throw new InvalidOperationException("Nao foi possivel gerar um protocolo unico para a demanda.");
+    }
+
     private async Task<string> GerarProtocoloAsync(CancellationToken cancellationToken)
     {
         var year = DateTime.UtcNow.Year;
-        var start = Uri.EscapeDataString($"{year}-01-01");
-        var end = Uri.EscapeDataString($"{year + 1}-01-01");
+        var prefix = $"LUX-{year}-";
         var rows = await _supabase.QueryRowsAsync(
-            $"Demanda?select=id&created_at=gte.{start}&created_at=lt.{end}&limit=100000",
+            $"Demanda?select=protocolo&protocolo=like.{Uri.EscapeDataString(prefix + "%")}&limit=100000",
             cancellationToken);
-        return $"LUX-{year}-{(rows.Length + 1).ToString().PadLeft(5, '0')}";
+        var lastSequence = rows
+            .Select(row => TryGetProtocolSequence(row.GetNullableString("protocolo"), prefix))
+            .Where(sequence => sequence.HasValue)
+            .Select(sequence => sequence!.Value)
+            .DefaultIfEmpty(0)
+            .Max();
+        return $"{prefix}{(lastSequence + 1).ToString().PadLeft(5, '0')}";
+    }
+
+    private static int? TryGetProtocolSequence(string? protocolo, string prefix)
+    {
+        if (string.IsNullOrWhiteSpace(protocolo) || !protocolo.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return int.TryParse(protocolo[prefix.Length..], NumberStyles.None, CultureInfo.InvariantCulture, out var sequence)
+            ? sequence
+            : null;
+    }
+
+    private static bool IsDuplicateProtocoloError(InvalidOperationException ex)
+    {
+        var message = ex.Message;
+        return message.Contains("Demanda_protocolo_key", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("\"protocolo\"", StringComparison.OrdinalIgnoreCase) && message.Contains("23505", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("protocolo", StringComparison.OrdinalIgnoreCase) && message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase);
     }
 
     private static (int Page, int PageSize, int Offset) GetPagination(ListDemandasFiltersQuery filters)
