@@ -1,4 +1,4 @@
-// Luxus Tasks - Schema do Banco de Dados
+// LUXUS DEMANDAS - Schema do Banco de Dados
 // https://pris.ly/d/prisma-schema
 
 generator client {
@@ -20,9 +20,10 @@ enum RoleSlug {
 
 enum DemandaStatus {
   em_aberto
+  em_andamento
   concluido
-  pendente
-  pendente_de_resposta
+  standby
+  cancelado
 }
 
 enum RecorrenciaTipo {
@@ -45,9 +46,11 @@ model User {
   setorPermissoes UserSetorPermissao[]
   demandasCriadas Demanda[] @relation("DemandaCriador")
   demandasResponsavel DemandaResponsavel[]
+  subtarefasResponsavel Subtarefa[] @relation("SubtarefaResponsavel")
   observacoes   Observacao[]
   templatesCriados Template[]
   templateResponsavel TemplateResponsavel[]
+  templateSubtarefasResponsavel TemplateSubtarefa[] @relation("TemplateSubtarefaResponsavel")
 }
 
 model Role {
@@ -154,11 +157,14 @@ model DemandaResponsavel {
 }
 
 model Subtarefa {
-  id        String   @id @default(uuid())
-  demandaId String   @map("demanda_id")
-  titulo    String
-  concluida Boolean  @default(false)
-  demanda   Demanda  @relation(fields: [demandaId], references: [id], onDelete: Cascade)
+  id               String   @id @default(uuid())
+  demandaId        String   @map("demanda_id")
+  titulo           String
+  concluida        Boolean  @default(false)
+  ordem            Int      @default(0) @map("ordem")
+  responsavelUserId String? @map("responsavel_user_id")
+  demanda          Demanda  @relation(fields: [demandaId], references: [id], onDelete: Cascade)
+  responsavel      User?    @relation("SubtarefaResponsavel", fields: [responsavelUserId], references: [id], onDelete: SetNull)
   @@map("subtarefa")
 }
 
@@ -204,6 +210,7 @@ model Template {
   observacoesGeraisTemplate   String?   @map("observacoes_gerais_template") @db.Text
   isRecorrenteDefault         Boolean   @default(false) @map("is_recorrente_default")
   recorrenciaTipo             RecorrenciaTipo? @map("recorrencia_tipo")
+  recorrenciaDataBaseDefault  DateTime? @map("recorrencia_data_base_default") @db.Date
   recorrenciaPrazoReaberturaDias Int?   @map("recorrencia_prazo_reabertura_dias")
   criadorId                   String    @map("criador_id")
   createdAt                   DateTime  @default(now()) @map("created_at")
@@ -235,10 +242,12 @@ model TemplateResponsavel {
 }
 
 model TemplateSubtarefa {
-  id         String   @id @default(uuid())
-  templateId String   @map("template_id")
-  titulo     String   @map("titulo")
-  ordem      Int      @default(0) @map("ordem")
-  template   Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  id               String   @id @default(uuid())
+  templateId       String   @map("template_id")
+  titulo           String   @map("titulo")
+  ordem            Int      @default(0) @map("ordem")
+  responsavelUserId String? @map("responsavel_user_id")
+  template         Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  responsavel      User?    @relation("TemplateSubtarefaResponsavel", fields: [responsavelUserId], references: [id], onDelete: SetNull)
   @@map("template_subtarefa")
 }

@@ -30,6 +30,15 @@ export class CreateDemandaFromTemplateDto {
   observacoesGerais?: string;
 
   @IsOptional()
+  @IsBoolean()
+  isPrivada?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  privateViewerIds?: string[];
+
+  @IsOptional()
   @IsArray()
   @IsUUID('4', { each: true })
   clienteIds?: string[];
@@ -48,7 +57,7 @@ export class CreateDemandaFromTemplateDto {
   /** Sobrescrever subtarefas do template (opcional). Se não enviado, usa do template. */
   @IsOptional()
   @IsArray()
-  subtarefas?: { titulo: string }[];
+  subtarefas?: { titulo: string; responsavelUserId?: string }[];
 
   /** Se demanda será recorrente; data base para a recorrência */
   @IsOptional()

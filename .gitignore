@@ -29,7 +29,14 @@ uploads/
 # Test / coverage
 coverage/
 .nyc_output/
+scripts/.legacy-cache/
 
 # TypeScript
 *.tsbuildinfo
 .vercel
+
+# .NET / C#
+backend-csharp/bin/
+backend-csharp/obj/
+backend-csharp-api/bin/
+backend-csharp-api/obj/

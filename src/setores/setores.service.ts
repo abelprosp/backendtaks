@@ -2,6 +2,7 @@ import { Injectable, ConflictException, NotFoundException } from '@nestjs/common
 import { SupabaseService } from '../supabase/supabase.service';
 import { CreateSetorDto } from './dto/create-setor.dto';
 import { UpdateSetorDto } from './dto/update-setor.dto';
+import { MemoryTtlCache } from '../common/memory-ttl-cache';
 
 function slugify(s: string): string {
   return s
@@ -16,11 +17,15 @@ function slugify(s: string): string {
 
 @Injectable()
 export class SetoresService {
+  private readonly listCache = new MemoryTtlCache<string, any[]>(60_000);
+
   constructor(private supabase: SupabaseService) {}
 
   async findAll() {
-    const { data } = await this.supabase.getClient().from('Setor').select('*').order('name');
-    return data ?? [];
+    return this.listCache.getOrLoad('all', async () => {
+      const { data } = await this.supabase.getClient().from('Setor').select('*').order('name');
+      return data ?? [];
+    });
   }
 
   async create(dto: CreateSetorDto) {
@@ -30,6 +35,7 @@ export class SetoresService {
     if (existing?.length) throw new ConflictException('Já existe um setor com esse slug');
     const { data, error } = await sb.from('Setor').insert({ name: dto.name.trim(), slug }).select().single();
     if (error) throw new Error(error.message);
+    this.listCache.clear();
     return data;
   }
 
@@ -47,6 +53,7 @@ export class SetoresService {
     }
     const { data, error } = await sb.from('Setor').update(upd).eq('id', id).select().single();
     if (error) throw new Error(error.message);
+    this.listCache.clear();
     return data;
   }
 
@@ -55,6 +62,7 @@ export class SetoresService {
     const { data: row } = await sb.from('Setor').select('id').eq('id', id).single();
     if (!row) throw new NotFoundException('Setor não encontrado');
     await sb.from('Setor').delete().eq('id', id);
+    this.listCache.clear();
     return { id };
   }
 }

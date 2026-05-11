@@ -1,0 +1,14 @@
+.git
+.gitignore
+.vercel
+node_modules
+dist
+coverage
+.nyc_output
+uploads
+*.tsbuildinfo
+.env
+.env.local
+.env.*.local
+backend-csharp/bin
+backend-csharp/obj

@@ -34,12 +34,21 @@ export class CreateDemandaDto {
   prazo?: string;
 
   @IsOptional()
-  @IsEnum(['em_aberto', 'pendente', 'concluido'])
-  status?: 'em_aberto' | 'pendente' | 'concluido';
+  @IsEnum(['em_aberto', 'em_andamento', 'concluido', 'standby', 'cancelado'])
+  status?: 'em_aberto' | 'em_andamento' | 'concluido' | 'standby' | 'cancelado';
 
   @IsOptional()
   @IsString()
   observacoesGerais?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isPrivada?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  privateViewerIds?: string[];
 
   @IsOptional()
   @IsBoolean()
@@ -59,7 +68,7 @@ export class CreateDemandaDto {
 
   @IsOptional()
   @IsArray()
-  subtarefas?: { titulo: string }[];
+  subtarefas?: { titulo: string; responsavelUserId?: string }[];
 
   @IsOptional()
   recorrencia?: RecorrenciaDto;
