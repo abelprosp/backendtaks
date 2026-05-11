@@ -238,10 +238,61 @@ export class DemandasService {
   private async gerarProtocolo(): Promise<string> {
     const sb = this.supabase.getClient();
     const year = new Date().getFullYear();
-    const start = `${year}-01-01`;
-    const end = `${year + 1}-01-01`;
-    const { count } = await sb.from('Demanda').select('*', { count: 'exact', head: true }).gte('created_at', start).lt('created_at', end);
-    return `LUX-${year}-${String((count ?? 0) + 1).padStart(5, '0')}`;
+    const prefix = `LUX-${year}-`;
+    const { data, error } = await sb
+      .from('Demanda')
+      .select('protocolo')
+      .like('protocolo', `${prefix}%`)
+      .limit(100000);
+    if (error) throw new Error(error.message);
+
+    const lastSequence = (data ?? [])
+      .map((row) => this.protocoloSequence(row?.protocolo, prefix))
+      .filter((sequence): sequence is number => sequence != null)
+      .reduce((max, sequence) => Math.max(max, sequence), 0);
+    return `${prefix}${String(lastSequence + 1).padStart(5, '0')}`;
+  }
+
+  private protocoloSequence(protocolo: string | null | undefined, prefix: string): number | null {
+    if (!protocolo || !protocolo.toUpperCase().startsWith(prefix.toUpperCase())) return null;
+    const sequence = Number.parseInt(protocolo.slice(prefix.length), 10);
+    return Number.isFinite(sequence) ? sequence : null;
+  }
+
+  private isDuplicateProtocoloError(error: unknown): boolean {
+    const candidate = error as { code?: string; message?: string; details?: string };
+    const text = [candidate?.code, candidate?.message, candidate?.details]
+      .filter(Boolean)
+      .join(' ');
+    return /Demanda_protocolo_key/i.test(text)
+      || (/23505/i.test(text) && /protocolo/i.test(text))
+      || (/duplicate key/i.test(text) && /protocolo/i.test(text));
+  }
+
+  private async insertDemandaWithGeneratedProtocolo(payload: Record<string, unknown>) {
+    const sb = this.supabase.getClient();
+    const maxAttempts = 8;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const protocolo = await this.gerarProtocolo();
+      const { data, error } = await sb
+        .from('Demanda')
+        .insert({ ...payload, protocolo })
+        .select()
+        .single();
+
+      if (!error) {
+        if (!data) throw new Error('Não foi possível criar a demanda.');
+        return data;
+      }
+
+      if (!this.isDuplicateProtocoloError(error) || attempt === maxAttempts - 1) {
+        throw new Error(error.message);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)));
+    }
+
+    throw new Error('Não foi possível gerar um protocolo único para a demanda.');
   }
 
   private getAnexosBucket(): string {
@@ -986,25 +1037,18 @@ export class DemandasService {
 
   async create(userId: string, dto: CreateDemandaDto) {
     const sb = this.supabase.getClient();
-    const protocolo = await this.gerarProtocolo();
     const status = (dto.status as DemandaStatus) || 'em_aberto';
-    const { data: demanda, error } = await sb
-      .from('Demanda')
-      .insert({
-        protocolo,
-        assunto: dto.assunto,
-        prioridade: dto.prioridade ?? false,
-        prazo: dto.prazo ?? null,
-        status,
-        criador_id: userId,
-        observacoes_gerais: dto.observacoesGerais ?? null,
-        is_privada: dto.isPrivada ?? false,
-        private_owner_user_id: dto.isPrivada ? userId : null,
-        is_recorrente: dto.isRecorrente ?? false,
-      })
-      .select()
-      .single();
-    if (error) throw new Error(error.message);
+    const demanda = await this.insertDemandaWithGeneratedProtocolo({
+      assunto: dto.assunto,
+      prioridade: dto.prioridade ?? false,
+      prazo: dto.prazo ?? null,
+      status,
+      criador_id: userId,
+      observacoes_gerais: dto.observacoesGerais ?? null,
+      is_privada: dto.isPrivada ?? false,
+      private_owner_user_id: dto.isPrivada ? userId : null,
+      is_recorrente: dto.isRecorrente ?? false,
+    });
     if (dto.setores?.length) await sb.from('demanda_setor').insert(dto.setores.map((setorId) => ({ demanda_id: demanda.id, setor_id: setorId })));
     if (dto.clienteIds?.length) await sb.from('demanda_cliente').insert(dto.clienteIds.map((clienteId) => ({ demanda_id: demanda.id, cliente_id: clienteId })));
     if (dto.responsaveis?.length) await sb.from('demanda_responsavel').insert(dto.responsaveis.map((r) => ({ demanda_id: demanda.id, user_id: r.userId, is_principal: r.isPrincipal ?? false })));
@@ -1036,7 +1080,6 @@ export class DemandasService {
 
   async createFromTemplate(userId: string, templateId: string, dto: CreateDemandaFromTemplateDto) {
     const template = await this.templatesService.getForDemanda(templateId) as any;
-    const protocolo = await this.gerarProtocolo();
     const prioridade = dto.prioridade ?? template.prioridadeDefault;
     const observacoesGerais = dto.observacoesGerais ?? template.observacoesGeraisTemplate ?? undefined;
     const recorrenciaDataBase = dto.recorrenciaDataBase ?? template.recorrenciaDataBaseDefault ?? undefined;
@@ -1053,23 +1096,17 @@ export class DemandasService {
     ) ?? [];
 
     const sb = this.supabase.getClient();
-    const { data: demanda, error } = await sb
-      .from('Demanda')
-      .insert({
-        protocolo,
-        assunto: dto.assunto,
-        prioridade,
-        prazo: dto.prazo ?? null,
-        status: 'em_aberto',
-        criador_id: userId,
-        observacoes_gerais: observacoesGerais ?? null,
-        is_privada: dto.isPrivada ?? false,
-        private_owner_user_id: dto.isPrivada ? userId : null,
-        is_recorrente: isRecorrente,
-      })
-      .select()
-      .single();
-    if (error) throw new Error(error.message);
+    const demanda = await this.insertDemandaWithGeneratedProtocolo({
+      assunto: dto.assunto,
+      prioridade,
+      prazo: dto.prazo ?? null,
+      status: 'em_aberto',
+      criador_id: userId,
+      observacoes_gerais: observacoesGerais ?? null,
+      is_privada: dto.isPrivada ?? false,
+      private_owner_user_id: dto.isPrivada ? userId : null,
+      is_recorrente: isRecorrente,
+    });
 
     if (setorIds.length) await sb.from('demanda_setor').insert(setorIds.map((setorId: string) => ({ demanda_id: demanda.id, setor_id: setorId })));
     if (dto.clienteIds?.length) await sb.from('demanda_cliente').insert(dto.clienteIds.map((clienteId) => ({ demanda_id: demanda.id, cliente_id: clienteId })));
