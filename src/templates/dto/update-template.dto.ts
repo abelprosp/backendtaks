@@ -57,6 +57,11 @@ export class UpdateTemplateDto {
 
   @IsOptional()
   @IsArray()
+  @IsUUID('4', { each: true })
+  clienteIds?: string[];
+
+  @IsOptional()
+  @IsArray()
   responsaveis?: { userId: string; isPrincipal?: boolean }[];
 
   @IsOptional()

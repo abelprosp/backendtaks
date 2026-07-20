@@ -1,4 +1,5 @@
-import { IsString, IsBoolean, IsOptional, IsArray, IsUUID, IsDateString, IsEnum, MinLength } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { IsString, IsBoolean, IsOptional, IsArray, IsUUID, IsDateString, IsEnum, MinLength, ValidateIf } from 'class-validator';
 
 export class UpdateDemandaDto {
   @IsOptional()
@@ -11,8 +12,10 @@ export class UpdateDemandaDto {
   prioridade?: boolean;
 
   @IsOptional()
+  @Transform(({ value }) => (value === '' ? null : value))
+  @ValidateIf((_, v) => v != null)
   @IsDateString()
-  prazo?: string;
+  prazo?: string | null;
 
   @IsOptional()
   @IsEnum(['em_aberto', 'em_andamento', 'concluido', 'standby', 'cancelado'])
@@ -45,7 +48,7 @@ export class UpdateDemandaDto {
 
   @IsOptional()
   @IsArray()
-  subtarefas?: { titulo: string; concluida?: boolean; ordem?: number; responsavelUserId?: string }[];
+  subtarefas?: { id?: string; titulo: string; concluida?: boolean; ordem?: number; responsavelUserId?: string }[];
 
   @IsOptional()
   @IsBoolean()

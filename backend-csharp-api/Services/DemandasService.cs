@@ -11,6 +11,7 @@ namespace LuxusDemandas.Api.Services;
 
 public sealed class DemandasService
 {
+    private const string DashboardBaselineTimestamp = "2026-04-01T00:00:00";
     private readonly SupabaseRestService _supabase;
     private readonly DemandaVisibilityService _visibility;
     private readonly TemplatesService _templates;
@@ -40,7 +41,6 @@ public sealed class DemandasService
 
     public async Task<object> CreateAsync(string userId, CreateDemandaRequest request, CancellationToken cancellationToken)
     {
-        var protocolo = await GerarProtocoloAsync(cancellationToken);
         var status = string.IsNullOrWhiteSpace(request.Status) ? "em_aberto" : request.Status;
         var isPrivada = request.IsPrivada == true;
         if (isPrivada && !await _visibility.CanManagePrivateDemandasAsync(userId, cancellationToken))
@@ -52,18 +52,17 @@ public sealed class DemandasService
         var responsaveis = NormalizeResponsaveis(request.Responsaveis);
         var subtarefas = NormalizeCreateSubtarefas(request.Subtarefas);
 
-        var created = await _supabase.InsertSingleAsync("Demanda", new
+        var created = await InsertDemandaWithGeneratedProtocoloAsync(new Dictionary<string, object?>
         {
-            protocolo,
-            assunto = request.Assunto,
-            prioridade = request.Prioridade ?? false,
-            prazo = request.Prazo,
-            status,
-            criador_id = userId,
-            observacoes_gerais = request.ObservacoesGerais,
-            is_recorrente = request.IsRecorrente ?? false,
-            is_privada = isPrivada,
-            private_owner_user_id = isPrivada ? userId : null,
+            ["assunto"] = request.Assunto,
+            ["prioridade"] = request.Prioridade ?? false,
+            ["prazo"] = NormalizePrazoForColumn(request.Prazo),
+            ["status"] = status,
+            ["criador_id"] = userId,
+            ["observacoes_gerais"] = request.ObservacoesGerais,
+            ["is_recorrente"] = request.IsRecorrente ?? false,
+            ["is_privada"] = isPrivada,
+            ["private_owner_user_id"] = isPrivada ? userId : null,
         }, cancellationToken);
 
         var demandaId = created.GetStringOrEmpty("id");
@@ -104,7 +103,6 @@ public sealed class DemandasService
     public async Task<object> CreateFromTemplateAsync(string userId, string templateId, CreateDemandaFromTemplateRequest request, CancellationToken cancellationToken)
     {
         var template = await _templates.LoadForDemandaAsync(templateId, cancellationToken);
-        var protocolo = await GerarProtocoloAsync(cancellationToken);
         var isPrivada = request.IsPrivada == true;
         if (isPrivada && !await _visibility.CanManagePrivateDemandasAsync(userId, cancellationToken))
         {
@@ -137,18 +135,17 @@ public sealed class DemandasService
                 ResponsavelUserId = IsUuid(item.ResponsavelUserId) ? item.ResponsavelUserId : null,
             }).ToList();
 
-        var created = await _supabase.InsertSingleAsync("Demanda", new
+        var created = await InsertDemandaWithGeneratedProtocoloAsync(new Dictionary<string, object?>
         {
-            protocolo,
-            assunto = request.Assunto,
-            prioridade,
-            prazo = request.Prazo,
-            status = "em_aberto",
-            criador_id = userId,
-            observacoes_gerais = observacoesGerais,
-            is_recorrente = isRecorrente,
-            is_privada = isPrivada,
-            private_owner_user_id = isPrivada ? userId : null,
+            ["assunto"] = request.Assunto,
+            ["prioridade"] = prioridade,
+            ["prazo"] = NormalizePrazoForColumn(request.Prazo),
+            ["status"] = "em_aberto",
+            ["criador_id"] = userId,
+            ["observacoes_gerais"] = observacoesGerais,
+            ["is_recorrente"] = isRecorrente,
+            ["is_privada"] = isPrivada,
+            ["private_owner_user_id"] = isPrivada ? userId : null,
         }, cancellationToken);
 
         var demandaId = created.GetStringOrEmpty("id");
@@ -507,17 +504,15 @@ public sealed class DemandasService
     public async Task<object> UpdateAsync(string userId, string id, UpdateDemandaRequest request, CancellationToken cancellationToken)
     {
         _ = await FindOneAsync(userId, id, cancellationToken);
-        var isResponsavelPrincipal = await IsResponsavelPrincipalAsync(userId, id, cancellationToken);
         var newStatus = request.Status;
-        if (!string.IsNullOrWhiteSpace(newStatus) && !isResponsavelPrincipal && !string.Equals(newStatus, "standby", StringComparison.Ordinal))
-        {
-            newStatus = "standby";
-        }
 
         var updates = new Dictionary<string, object?>();
         if (request.Assunto is not null) updates["assunto"] = request.Assunto;
         if (request.Prioridade.HasValue) updates["prioridade"] = request.Prioridade.Value;
-        if (request.Prazo is not null) updates["prazo"] = request.Prazo;
+        if (request.PrazoWasProvided)
+        {
+            updates["prazo"] = string.IsNullOrWhiteSpace(request.PrazoValue) ? null : NormalizePrazoForColumn(request.PrazoValue);
+        }
         if (request.IsPrivada.HasValue)
         {
             if (!await _visibility.CanManagePrivateDemandasAsync(userId, cancellationToken))
@@ -605,19 +600,21 @@ public sealed class DemandasService
             ["ultima_observacao_em"] = DateTime.UtcNow.ToString("O"),
         };
 
-        var isResponsavel = await IsResponsavelPrincipalAsync(userId, demandaId, cancellationToken);
-        if (!isResponsavel)
-        {
-            demandaUpdates["status"] = "standby";
-        }
-
         await _supabase.UpdateSingleAsync("Demanda", $"id=eq.{Uri.EscapeDataString(demandaId)}", demandaUpdates, cancellationToken);
         await _audit.AddDemandaEventAsync(
             demandaId,
             userId,
             "observacao_adicionada",
             "Observacao adicionada.",
-            null,
+            new
+            {
+                title = "Observacao adicionada",
+                summary = texto.Trim().Length > 120 ? texto.Trim()[..120] : texto.Trim(),
+                entries = new object[]
+                {
+                    new { label = "Texto", value = texto.Trim() },
+                },
+            },
             cancellationToken);
         return await FindOneAsync(userId, demandaId, cancellationToken);
     }
@@ -642,28 +639,20 @@ public sealed class DemandasService
         }
 
         var observacao = await _supabase.QuerySingleAsync(
-            $"observacao?select=id,user_id&demanda_id=eq.{Uri.EscapeDataString(demandaId)}&id=eq.{Uri.EscapeDataString(observacaoId)}&limit=1",
+            $"observacao?select=id,user_id,texto&demanda_id=eq.{Uri.EscapeDataString(demandaId)}&id=eq.{Uri.EscapeDataString(observacaoId)}&limit=1",
             cancellationToken);
         if (observacao is null)
         {
             throw new KeyNotFoundException("Observação não encontrada");
         }
 
-        var isResponsavel = await IsResponsavelPrincipalAsync(userId, demandaId, cancellationToken);
-        if (!string.Equals(observacao.Value.GetStringOrEmpty("user_id"), userId, StringComparison.Ordinal) && !isResponsavel)
-        {
-            throw new UnauthorizedAccessException("Sem permissão para editar esta observação.");
-        }
+        var beforeText = observacao.Value.GetNullableString("texto")?.Trim();
+        var afterText = texto.Trim();
 
         await _supabase.UpdateSingleAsync(
             "observacao",
             $"id=eq.{Uri.EscapeDataString(observacaoId)}&demanda_id=eq.{Uri.EscapeDataString(demandaId)}",
-            new
-            {
-                texto = texto.Trim(),
-                user_id = userId,
-                created_at = DateTime.UtcNow.ToString("O"),
-            },
+            new { texto = afterText },
             cancellationToken);
 
         await _audit.AddDemandaEventAsync(
@@ -671,7 +660,17 @@ public sealed class DemandasService
             userId,
             "observacao_editada",
             "Observacao editada.",
-            new { observacaoId },
+            new
+            {
+                observacaoId,
+                title = "Observacao editada",
+                summary = afterText.Length > 120 ? afterText[..120] : afterText,
+                entries = new object[]
+                {
+                    new { label = "Antes", value = string.IsNullOrWhiteSpace(beforeText) ? "Sem texto" : beforeText },
+                    new { label = "Depois", value = afterText },
+                },
+            },
             cancellationToken);
 
         return await FindOneAsync(userId, demandaId, cancellationToken);
@@ -707,10 +706,11 @@ public sealed class DemandasService
         var legacyDemandaId = await ResolveLegacyDemandaIdAsync(demanda.Value, demandaId, cancellationToken);
         if (_options.PreferLegacyAttachments && !string.IsNullOrWhiteSpace(legacyDemandaId) && _legacyAttachments.IsConfigured)
         {
+            var safeLegacyTransportFilename = NormalizeLegacyTransportFilename(string.IsNullOrWhiteSpace(originalFilename) ? "file" : originalFilename);
             var legacy = await _legacyAttachments.UploadAsync(
                 legacyDemandaId,
                 buffer,
-                string.IsNullOrWhiteSpace(originalFilename) ? "file" : originalFilename,
+                safeLegacyTransportFilename,
                 string.IsNullOrWhiteSpace(displayName) ? originalFilename : displayName!,
                 string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType,
                 cancellationToken);
@@ -718,7 +718,7 @@ public sealed class DemandasService
             var createdLegacy = await _supabase.InsertSingleAsync("anexo", new
             {
                 demanda_id = demandaId,
-                filename = string.IsNullOrWhiteSpace(legacy.Filename) ? originalFilename : legacy.Filename,
+                filename = string.IsNullOrWhiteSpace(originalFilename) ? (string.IsNullOrWhiteSpace(legacy.Filename) ? "file" : legacy.Filename) : originalFilename,
                 mime_type = string.IsNullOrWhiteSpace(contentType) ? GuessMimeType(legacy.Filename) : contentType,
                 size,
                 storage_path = legacy.StoragePath,
@@ -966,29 +966,8 @@ public sealed class DemandasService
     public async Task<object> GetDashboardKpisAsync(bool avaliarComIa, CancellationToken cancellationToken)
     {
         _ = avaliarComIa;
-        try
-        {
-            var rpcResult = await _supabase.RpcAsync<JsonElement>("rpc_dashboard_kpis", new { }, cancellationToken);
-            var row = rpcResult.ValueKind switch
-            {
-                JsonValueKind.Array => rpcResult.EnumerateArray().FirstOrDefault(),
-                JsonValueKind.Object => rpcResult,
-                _ => default,
-            };
-            if (row.ValueKind != JsonValueKind.Undefined)
-            {
-                return new
-                {
-                    metricas = MapDashboardMetricas(row),
-                };
-            }
-        }
-        catch
-        {
-        }
-
         var rowsFallback = await _supabase.QueryAllRowsAsync(
-            "Demanda?select=id,status,created_at,updated_at,resolvido_em,ultima_observacao_em&order=created_at.desc",
+            $"Demanda?select=id,status,created_at,updated_at,resolvido_em,ultima_observacao_em&created_at=gte.{Uri.EscapeDataString(DashboardBaselineTimestamp)}&order=created_at.desc",
             cancellationToken);
         var now = DateTime.UtcNow;
         var concluidas = rowsFallback.Where(row => string.Equals(row.GetStringOrEmpty("status"), "concluido", StringComparison.Ordinal)).ToList();
@@ -997,7 +976,16 @@ public sealed class DemandasService
             .Where(value => value.HasValue)
             .Select(value => value!.Value)
             .ToList();
-        var comUltimaObs = rowsFallback
+        var activeRows = rowsFallback
+            .Where(row =>
+            {
+                var status = row.GetStringOrEmpty("status");
+                return string.Equals(status, "em_aberto", StringComparison.Ordinal)
+                    || string.Equals(status, "em_andamento", StringComparison.Ordinal)
+                    || string.Equals(status, "standby", StringComparison.Ordinal);
+            })
+            .ToArray();
+        var comUltimaObs = activeRows
             .Select(row => ParseDate(row.GetNullableString("ultima_observacao_em")))
             .Where(value => value.HasValue)
             .Select(value => value!.Value)
@@ -1013,7 +1001,7 @@ public sealed class DemandasService
             concluidas = concluidas.Count,
             emAberto = rowsFallback.Count(row => string.Equals(row.GetStringOrEmpty("status"), "em_aberto", StringComparison.Ordinal)),
             tempoMedioResolucaoHoras = temposResolucao.Count > 0 ? Math.Round(temposResolucao.Average(), 1) : (double?)null,
-            demandasSemObservacaoRecente = rowsFallback.Count(row =>
+            demandasSemObservacaoRecente = activeRows.Count(row =>
             {
                 var ultima = ParseDate(row.GetNullableString("ultima_observacao_em"));
                 return !ultima.HasValue || (now - ultima.Value).TotalHours > 24 * 7;
@@ -1025,15 +1013,59 @@ public sealed class DemandasService
         return new { metricas };
     }
 
+    private async Task<JsonElement> InsertDemandaWithGeneratedProtocoloAsync(Dictionary<string, object?> payload, CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 8;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            payload["protocolo"] = await GerarProtocoloAsync(cancellationToken);
+            try
+            {
+                return await _supabase.InsertSingleAsync("Demanda", payload, cancellationToken);
+            }
+            catch (InvalidOperationException ex) when (IsDuplicateProtocoloError(ex) && attempt < maxAttempts - 1)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(40 * (attempt + 1)), cancellationToken);
+            }
+        }
+
+        throw new InvalidOperationException("Nao foi possivel gerar um protocolo unico para a demanda.");
+    }
+
     private async Task<string> GerarProtocoloAsync(CancellationToken cancellationToken)
     {
         var year = DateTime.UtcNow.Year;
-        var start = Uri.EscapeDataString($"{year}-01-01");
-        var end = Uri.EscapeDataString($"{year + 1}-01-01");
+        var prefix = $"LUX-{year}-";
         var rows = await _supabase.QueryRowsAsync(
-            $"Demanda?select=id&created_at=gte.{start}&created_at=lt.{end}&limit=100000",
+            $"Demanda?select=protocolo&protocolo=like.{Uri.EscapeDataString(prefix + "%")}&limit=100000",
             cancellationToken);
-        return $"LUX-{year}-{(rows.Length + 1).ToString().PadLeft(5, '0')}";
+        var lastSequence = rows
+            .Select(row => TryGetProtocolSequence(row.GetNullableString("protocolo"), prefix))
+            .Where(sequence => sequence.HasValue)
+            .Select(sequence => sequence!.Value)
+            .DefaultIfEmpty(0)
+            .Max();
+        return $"{prefix}{(lastSequence + 1).ToString().PadLeft(5, '0')}";
+    }
+
+    private static int? TryGetProtocolSequence(string? protocolo, string prefix)
+    {
+        if (string.IsNullOrWhiteSpace(protocolo) || !protocolo.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return int.TryParse(protocolo[prefix.Length..], NumberStyles.None, CultureInfo.InvariantCulture, out var sequence)
+            ? sequence
+            : null;
+    }
+
+    private static bool IsDuplicateProtocoloError(InvalidOperationException ex)
+    {
+        var message = ex.Message;
+        return message.Contains("Demanda_protocolo_key", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("\"protocolo\"", StringComparison.OrdinalIgnoreCase) && message.Contains("23505", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("protocolo", StringComparison.OrdinalIgnoreCase) && message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase);
     }
 
     private static (int Page, int PageSize, int Offset) GetPagination(ListDemandasFiltersQuery filters)
@@ -2038,6 +2070,27 @@ public sealed class DemandasService
     private static string SanitizeFilename(string filename) =>
         Regex.Replace(filename, @"[^a-zA-Z0-9._-]", "_");
 
+    private static string NormalizeLegacyTransportFilename(string filename)
+    {
+        var trimmed = string.IsNullOrWhiteSpace(filename) ? "arquivo" : filename.Trim();
+        var extension = Path.GetExtension(trimmed);
+        var fileNameWithoutExtension = Path.GetFileNameWithoutExtension(trimmed);
+        var normalized = fileNameWithoutExtension.Normalize(NormalizationForm.FormD);
+        var builder = new StringBuilder(normalized.Length);
+        foreach (var ch in normalized)
+        {
+            var category = CharUnicodeInfo.GetUnicodeCategory(ch);
+            if (category != UnicodeCategory.NonSpacingMark)
+            {
+                builder.Append(ch);
+            }
+        }
+
+        var safeBase = Regex.Replace(builder.ToString(), @"[^a-zA-Z0-9._\-\s]", "_").Trim();
+        var safeExt = Regex.Replace(extension ?? string.Empty, @"[^a-zA-Z0-9.]", string.Empty);
+        return $"{(string.IsNullOrWhiteSpace(safeBase) ? "arquivo" : safeBase)}{safeExt}";
+    }
+
     private static string GuessMimeType(string? filename)
     {
         var extension = Path.GetExtension(filename ?? string.Empty).ToLowerInvariant();
@@ -2075,10 +2128,11 @@ public sealed class DemandasService
         var existing = await _supabase.QuerySingleAsync(
             $"recorrencia_config?select=id&demanda_id=eq.{Uri.EscapeDataString(demandaId)}&limit=1",
             cancellationToken);
+        var dataBaseCol = NormalizePrazoForColumn(recorrencia.DataBase) ?? recorrencia.DataBase?.Trim();
         var payload = new
         {
             demanda_id = demandaId,
-            data_base = recorrencia.DataBase,
+            data_base = dataBaseCol,
             tipo = recorrencia.Tipo,
             prazo_reabertura_dias = recorrencia.PrazoReaberturaDias ?? 0,
         };
@@ -2094,7 +2148,7 @@ public sealed class DemandasService
             $"demanda_id=eq.{Uri.EscapeDataString(demandaId)}",
             new
             {
-                data_base = recorrencia.DataBase,
+                data_base = dataBaseCol,
                 tipo = recorrencia.Tipo,
                 prazo_reabertura_dias = recorrencia.PrazoReaberturaDias ?? 0,
             },
@@ -2226,7 +2280,7 @@ public sealed class DemandasService
             protocolo = row.GetStringOrEmpty("protocolo"),
             assunto = row.GetStringOrEmpty("assunto"),
             prioridade = row.GetBooleanOrDefault("prioridade"),
-            prazo = NormalizeDate(row.GetNullableString("prazo")),
+            prazo = ToCalendarDateOnlyBrazil(row.GetNullableString("prazo")) ?? row.GetNullableString("prazo"),
             status = row.GetStringOrEmpty("status"),
             criadorId = row.GetNullableString("criador_id"),
             observacoesGerais = row.GetNullableString("observacoes_gerais"),
@@ -2257,7 +2311,7 @@ public sealed class DemandasService
             recorrenciaConfig = recurring is JsonElement recurringValue && recurringValue.ValueKind == JsonValueKind.Object
                 ? new
                 {
-                    dataBase = NormalizeDate(recurringValue.GetNullableString("data_base")) ?? recurringValue.GetNullableString("data_base"),
+                    dataBase = ToCalendarDateOnlyBrazil(recurringValue.GetNullableString("data_base")) ?? recurringValue.GetNullableString("data_base"),
                     tipo = recurringValue.GetStringOrEmpty("tipo"),
                     prazoReaberturaDias = recurringValue.GetNullableInt32("prazo_reabertura_dias") ?? 0,
                 }
@@ -2295,7 +2349,7 @@ public sealed class DemandasService
             protocolo = row.GetStringOrEmpty("protocolo"),
             assunto = row.GetStringOrEmpty("assunto"),
             prioridade = row.GetBooleanOrDefault("prioridade"),
-            prazo = NormalizeDate(row.GetNullableString("prazo")) ?? row.GetNullableString("prazo"),
+            prazo = ToCalendarDateOnlyBrazil(row.GetNullableString("prazo")) ?? row.GetNullableString("prazo"),
             status = row.GetStringOrEmpty("status"),
             criadorId = row.GetNullableString("criador_id"),
             observacoesGerais = row.GetNullableString("observacoes_gerais"),
@@ -2327,7 +2381,7 @@ public sealed class DemandasService
             recorrenciaConfig = recurring is JsonElement recurringValue && recurringValue.ValueKind == JsonValueKind.Object
                 ? new
                 {
-                    dataBase = NormalizeDate(recurringValue.GetNullableString("data_base")) ?? recurringValue.GetNullableString("data_base"),
+                    dataBase = ToCalendarDateOnlyBrazil(recurringValue.GetNullableString("data_base")) ?? recurringValue.GetNullableString("data_base"),
                     tipo = recurringValue.GetStringOrEmpty("tipo"),
                     prazoReaberturaDias = recurringValue.GetNullableInt32("prazo_reabertura_dias") ?? 0,
                 }
@@ -2362,7 +2416,7 @@ public sealed class DemandasService
             protocolo = row.GetStringOrEmpty("protocolo"),
             assunto = row.GetStringOrEmpty("assunto"),
             prioridade = row.GetBooleanOrDefault("prioridade"),
-            prazo = NormalizeDate(row.GetNullableString("prazo")) ?? row.GetNullableString("prazo"),
+            prazo = ToCalendarDateOnlyBrazil(row.GetNullableString("prazo")) ?? row.GetNullableString("prazo"),
             status = row.GetStringOrEmpty("status"),
             criadorId = row.GetNullableString("criador_id"),
             observacoesGerais = row.GetNullableString("observacoes_gerais"),
@@ -2723,13 +2777,14 @@ public sealed class DemandasService
             return;
         }
 
-        var existing = await _supabase.QueryRowsAsync(
-            $"anexo?select=id&demanda_id=eq.{Uri.EscapeDataString(demandaId)}&limit=1",
+        var existingRows = await _supabase.QueryRowsAsync(
+            $"anexo?select=storage_path&demanda_id=eq.{Uri.EscapeDataString(demandaId)}",
             cancellationToken);
-        if (existing.Length > 0)
-        {
-            return;
-        }
+        var existingPaths = new HashSet<string>(
+            existingRows
+                .Select(row => row.GetNullableString("storage_path")?.Trim() ?? string.Empty)
+                .Where(path => !string.IsNullOrWhiteSpace(path)),
+            StringComparer.Ordinal);
 
         var legacyDemandaId = await ResolveLegacyDemandaIdAsync(demanda, demandaId, cancellationToken);
         if (string.IsNullOrWhiteSpace(legacyDemandaId))
@@ -2754,10 +2809,7 @@ public sealed class DemandasService
                 continue;
             }
 
-            var duplicate = await _supabase.QueryRowsAsync(
-                $"anexo?select=id&storage_path=eq.{Uri.EscapeDataString(item.StoragePath)}&limit=1",
-                cancellationToken);
-            if (duplicate.Length > 0)
+            if (existingPaths.Contains(item.StoragePath))
             {
                 continue;
             }
@@ -2770,6 +2822,7 @@ public sealed class DemandasService
                 size = 0,
                 storage_path = item.StoragePath,
             }, cancellationToken);
+            existingPaths.Add(item.StoragePath);
         }
     }
 
@@ -2870,7 +2923,7 @@ public sealed class DemandasService
         var camposBasicos = new List<string>();
         if (request.Assunto is not null) camposBasicos.Add("assunto");
         if (request.Prioridade.HasValue) camposBasicos.Add("prioridade");
-        if (request.Prazo is not null) camposBasicos.Add("prazo");
+        if (request.PrazoWasProvided) camposBasicos.Add("prazo");
         if (!string.IsNullOrWhiteSpace(newStatus)) camposBasicos.Add("status");
         if (request.ObservacoesGerais is not null) camposBasicos.Add("observacoes gerais");
         if (request.IsRecorrente.HasValue && request.Recorrencia is null) camposBasicos.Add("indicador de recorrencia");
@@ -3032,7 +3085,7 @@ public sealed class DemandasService
         }
 
         var matchingClientes = await LoadIdsAsync(
-            $"Cliente?select=id&name=ilike.{ilike}&limit=100000",
+            $"Cliente?select=id&or=(name.ilike.{ilike},nome_fantasia.ilike.{ilike},documento.ilike.{ilike})&limit=100000",
             "id",
             cancellationToken);
         if (matchingClientes.Count > 0)
@@ -3371,6 +3424,61 @@ public sealed class DemandasService
         return DateTime.TryParse(value, out var parsed)
             ? parsed.ToString("dd/MM/yyyy", CultureInfo.GetCultureInfo("pt-BR"))
             : value;
+    }
+
+    private static TimeZoneInfo ResolveBrazilTimeZone()
+    {
+        try
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById("America/Sao_Paulo");
+        }
+        catch
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById("E. South America Standard Time");
+        }
+    }
+
+    /// <summary>Prazo da demanda e data base de recorrência: calendário em America/Sao_Paulo (yyyy-MM-dd), alinhado ao input type="date" do frontend.</summary>
+    private static string? ToCalendarDateOnlyBrazil(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var s = value.Trim();
+        if (Regex.IsMatch(s, @"^\d{4}-\d{2}-\d{2}$", RegexOptions.None, TimeSpan.FromMilliseconds(200)))
+        {
+            return s.Length >= 10 ? s[..10] : s;
+        }
+
+        if (DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dto))
+        {
+            var wall = TimeZoneInfo.ConvertTime(dto, ResolveBrazilTimeZone());
+            return wall.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+
+        if (DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dt))
+        {
+            var dto2 = new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc));
+            var wall = TimeZoneInfo.ConvertTime(dto2, ResolveBrazilTimeZone());
+            return wall.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+
+        return s.Length >= 10 ? s[..10] : s;
+    }
+
+    /// <summary>Valor para coluna DATE (Postgres): apenas yyyy-MM-dd a partir de ISO ou data curta.</summary>
+    private static string? NormalizePrazoForColumn(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var s = value.Trim();
+        var m = Regex.Match(s, @"^(\d{4}-\d{2}-\d{2})", RegexOptions.None, TimeSpan.FromMilliseconds(200));
+        return m.Success ? m.Groups[1].Value : null;
     }
 
     private static string? NormalizeDate(string? value)

@@ -42,6 +42,11 @@ export class CreateDemandaDto {
   observacoesGerais?: string;
 
   @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  observacoes?: string[];
+
+  @IsOptional()
   @IsBoolean()
   isPrivada?: boolean;
 

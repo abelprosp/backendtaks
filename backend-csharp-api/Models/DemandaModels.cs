@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json;
 
 namespace LuxusDemandas.Api.Models;
 
@@ -83,7 +84,15 @@ public sealed class UpdateDemandaRequest
 
     public bool? Prioridade { get; init; }
 
-    public string? Prazo { get; init; }
+    public JsonElement? Prazo { get; init; }
+
+    public bool PrazoWasProvided =>
+        Prazo.HasValue && Prazo.Value.ValueKind != JsonValueKind.Undefined;
+
+    public string? PrazoValue =>
+        !PrazoWasProvided || Prazo!.Value.ValueKind == JsonValueKind.Null
+            ? null
+            : Prazo.Value.GetString();
 
     public string? Status { get; init; }
 

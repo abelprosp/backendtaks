@@ -35,6 +35,8 @@ const DEFAULT_OPTIONS = {
   protectTodayUpdates: false,
   checkPending: false,
   fromLegacyFinals: false,
+  syncOpenActiveDetails: false,
+  syncAllLegacyEvents: false,
   importOrphans: false,
   writeSnapshot: true,
 };
@@ -243,6 +245,18 @@ function parseArgs(argv) {
       options.fromLegacyFinals = true;
       continue;
     }
+    if (arg === '--sync-open-active-details') {
+      options.syncOpenActiveDetails = true;
+      options.phases = new Set();
+      options.writeSnapshot = false;
+      continue;
+    }
+    if (arg === '--sync-all-legacy-events') {
+      options.syncAllLegacyEvents = true;
+      options.phases = new Set();
+      options.writeSnapshot = false;
+      continue;
+    }
     if (arg === '--import-orphans') {
       options.importOrphans = true;
       continue;
@@ -429,6 +443,14 @@ function extractTextareaAfterLabel(html, label) {
     'is',
   );
   return section ? stripTags(section) : '';
+}
+
+function extractTextareaValuesByName(html, name) {
+  const regex = new RegExp(`<textarea[^>]*name=["']${escapeRegExp(name)}["'][^>]*>([\\s\\S]*?)</textarea>`, 'gis');
+  return [...String(html || '').matchAll(regex)]
+    .map((match) => stripTags(match[1] || ''))
+    .map((text) => text.trim())
+    .filter(Boolean);
 }
 
 function extractCheckedCheckboxLabels(html, inputName) {
@@ -1195,6 +1217,20 @@ function parseLegacyTemplateDetail(html, legacyId) {
       createdAt: parseBrDate(stripTags(cells[2] || '')),
     };
   }).filter((item) => item?.texto);
+  const observacoesModal = extractTextareaValuesByName(html, 'obs');
+  const observacoesTabelaNormalizadas = new Set(
+    observacoes
+      .map((item) => normalizeText(item.texto))
+      .filter(Boolean),
+  );
+  const observacoesExtras = dedupeBy(
+    observacoesModal.filter((texto) => !observacoesTabelaNormalizadas.has(normalizeText(texto))),
+    (item) => normalizeText(item),
+  );
+  const observacoesGeraisTemplate = [
+    ...observacoes.map((item) => joinObservationText(item)),
+    ...observacoesExtras,
+  ].join('\n\n').trim() || null;
 
   const setores = extractCheckedCheckboxLabels(html, 'setores_envolvidos[]');
   const status = extractSelectValue(html, 'status');
@@ -1205,7 +1241,7 @@ function parseLegacyTemplateDetail(html, legacyId) {
     name,
     assuntoTemplate,
     prioridadeDefault: isTruthyLegacy(prioridade),
-    observacoesGeraisTemplate: observacoes.map((item) => joinObservationText(item)).join('\n\n').trim() || null,
+    observacoesGeraisTemplate,
     isRecorrenteDefault: normalizeText(isRecorrenteLegacy) === 'sim',
     recorrenciaTipoLegacy,
     recorrenciaDataBaseDefault: parseIsoDateInput(recorrenciaDataBase),
@@ -2098,13 +2134,14 @@ async function importTemplates(context, templates) {
   for (const template of templates) {
     console.log(`importando template ${template.legacyId} - ${template.name}`);
     const mapKey = template.legacyId;
-    if (context.map.templates[mapKey]) continue;
-
-    const existing = await queryOne(
-      context.supabase,
-      `Template?select=id,name,assunto_template&name=eq.${encodeEq(template.name)}&assunto_template=eq.${encodeEq(template.assuntoTemplate || '')}&limit=1`,
-    );
-    let templateId = existing?.id;
+    let templateId = context.map.templates[mapKey] || null;
+    if (!templateId) {
+      const existing = await queryOne(
+        context.supabase,
+        `Template?select=id,name,assunto_template&name=eq.${encodeEq(template.name)}&assunto_template=eq.${encodeEq(template.assuntoTemplate || '')}&limit=1`,
+      );
+      templateId = existing?.id || null;
+    }
 
     const creatorName = template.history[0]?.userName || '';
     const creatorLegacy = resolveLegacyUserByName(context.userDirectory, creatorName);
@@ -2121,22 +2158,28 @@ async function importTemplates(context, templates) {
       warnings.push(`template ${template.legacyId}: recorrência "${template.recorrenciaTipoLegacy}" não suportada no novo sistema.`);
     }
 
+    const templatePayload = {
+      name: template.name,
+      descricao: `Migrado do legado (template ${template.legacyId})`,
+      assunto_template: template.assuntoTemplate || null,
+      prioridade_default: !!template.prioridadeDefault,
+      observacoes_gerais_template: template.observacoesGeraisTemplate,
+      is_recorrente_default: isRecorrenteDefault,
+      recorrencia_tipo: recurrenceType,
+      recorrencia_data_base_default: isRecorrenteDefault ? template.recorrenciaDataBaseDefault : null,
+      recorrencia_prazo_reabertura_dias: isRecorrenteDefault ? template.recorrenciaPrazoReaberturaDias : null,
+      criador_id: creatorId || context.migrationUserId,
+      created_at: template.createdAt ? template.createdAt.replace('T', ' ') : undefined,
+      updated_at: template.updatedAt ? template.updatedAt.replace('T', ' ') : undefined,
+    };
+
     if (!templateId) {
       const createdRows = await context.supabase.insert('Template', {
-        name: template.name,
-        descricao: `Migrado do legado (template ${template.legacyId})`,
-        assunto_template: template.assuntoTemplate || null,
-        prioridade_default: !!template.prioridadeDefault,
-        observacoes_gerais_template: template.observacoesGeraisTemplate,
-        is_recorrente_default: isRecorrenteDefault,
-        recorrencia_tipo: recurrenceType,
-        recorrencia_data_base_default: isRecorrenteDefault ? template.recorrenciaDataBaseDefault : null,
-        recorrencia_prazo_reabertura_dias: isRecorrenteDefault ? template.recorrenciaPrazoReaberturaDias : null,
-        criador_id: creatorId || context.migrationUserId,
-        created_at: template.createdAt ? template.createdAt.replace('T', ' ') : undefined,
-        updated_at: template.updatedAt ? template.updatedAt.replace('T', ' ') : undefined,
+        ...templatePayload,
       });
       templateId = (Array.isArray(createdRows) ? createdRows[0] : createdRows).id;
+    } else {
+      await context.supabase.patch('Template', `id=eq.${encodeEq(templateId)}`, templatePayload, { select: '' });
     }
 
     const setorIds = resolveSetorIds(context.reference, template.setores, warnings, `template ${template.legacyId}`);
@@ -2370,6 +2413,454 @@ async function importDemandasInBatches(legacy, context, pendingSummaries, option
   }
 }
 
+function toDbTimestamp(value) {
+  if (!value) return null;
+  return String(value).replace('T', ' ');
+}
+
+function normalizeSyncTimestamp(value) {
+  if (!value) return '';
+  const raw = String(value).trim().replace(' ', 'T');
+  const match = raw.match(/^(\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2}(?::\d{2})?))?/);
+  if (match) {
+    const [, datePart, timePart = ''] = match;
+    if (!timePart || /^00:00(?::00)?$/.test(timePart)) return datePart;
+    return `${datePart}T${timePart.length === 5 ? `${timePart}:00` : timePart}`;
+  }
+  return raw.slice(0, 19);
+}
+
+function syncTimestampSortValue(value) {
+  const normalized = normalizeSyncTimestamp(value);
+  if (!normalized) return null;
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2}))?$/);
+  if (!match) return null;
+  const [, year, month, day, hour = '00', minute = '00', second = '00'] = match;
+  const date = Date.UTC(
+    Number.parseInt(year, 10),
+    Number.parseInt(month, 10) - 1,
+    Number.parseInt(day, 10),
+    Number.parseInt(hour, 10),
+    Number.parseInt(minute, 10),
+    Number.parseInt(second, 10),
+  );
+  return Number.isNaN(date) ? null : date;
+}
+
+function isLegacyTimestampNewer(legacyValue, currentValue) {
+  const legacyTime = syncTimestampSortValue(legacyValue);
+  if (legacyTime == null) return false;
+  const currentTime = syncTimestampSortValue(currentValue);
+  return currentTime == null || legacyTime > currentTime;
+}
+
+function normalizeSyncText(value) {
+  return normalizeWhitespace(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function observationSyncKey(item) {
+  const text = normalizeSyncText(item?.texto);
+  const timestamp = normalizeSyncTimestamp(item?.created_at ?? item?.createdAt);
+  return timestamp ? `${timestamp}|${text}` : text;
+}
+
+function legacyEventSyncKey(item) {
+  const description = normalizeSyncText(item?.descricao ?? item?.raw);
+  const timestamp = normalizeSyncTimestamp(item?.created_at ?? item?.createdAt);
+  return timestamp ? `${timestamp}|${description}` : description;
+}
+
+function taskSyncKey(title) {
+  return normalizeSyncText(title).replace(/\s+/g, ' ').trim();
+}
+
+async function loadCurrentOpenActiveDemandasForSync(supabase) {
+  const rows = [];
+  const pageSize = 1000;
+  let offset = 0;
+
+  while (true) {
+    const batch = await supabase.select(
+      'Demanda?select=id,legacy_id,protocolo,assunto,status,updated_at,resolvido_em,ultima_observacao_em'
+        + ',prazo'
+        + `&status=in.(em_aberto,em_andamento)&legacy_id=not.is.null&order=legacy_id.asc&limit=${pageSize}&offset=${offset}`,
+    );
+    rows.push(...(batch ?? []));
+    if (!batch?.length || batch.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  return rows;
+}
+
+async function loadAllDemandasWithLegacyId(supabase) {
+  const rows = [];
+  const pageSize = 1000;
+  let offset = 0;
+
+  while (true) {
+    const batch = await supabase.select(
+      'Demanda?select=id,legacy_id,protocolo,assunto'
+        + `&legacy_id=not.is.null&order=legacy_id.asc&limit=${pageSize}&offset=${offset}`,
+    );
+    rows.push(...(batch ?? []));
+    if (!batch?.length || batch.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  return rows;
+}
+
+async function resolveLegacySyncUserId(context, userName) {
+  const normalizedName = normalizeWhitespace(userName);
+  if (!normalizedName) return context.migrationUserId;
+
+  context.legacyUserIdByName ??= new Map();
+  const cacheKey = normalizeText(normalizedName);
+  if (context.legacyUserIdByName.has(cacheKey)) {
+    return context.legacyUserIdByName.get(cacheKey);
+  }
+
+  const legacyUser = resolveLegacyUserByName(context.userDirectory, normalizedName);
+  const userId = await ensureImportedUser(context, {
+    name: normalizedName,
+    legacyUser,
+    type: legacyUser?.type,
+  });
+  context.legacyUserIdByName.set(cacheKey, userId || context.migrationUserId);
+  return userId || context.migrationUserId;
+}
+
+async function syncMissingLegacyObservacoes(context, demandaId, observacoes, apply) {
+  const existing = await context.supabase.select(
+    `observacao?select=id,texto,created_at&demanda_id=eq.${encodeEq(demandaId)}&limit=10000`,
+  );
+  const existingKeys = new Set((existing ?? []).map(observationSyncKey).filter(Boolean));
+  const rows = [];
+
+  for (const observacao of observacoes ?? []) {
+    const key = observationSyncKey(observacao);
+    if (!key || existingKeys.has(key)) continue;
+    existingKeys.add(key);
+
+    if (!apply) {
+      rows.push(observacao);
+      continue;
+    }
+
+    const userId = await resolveLegacySyncUserId(context, observacao.userName || 'Legacy Migration');
+    rows.push({
+      demanda_id: demandaId,
+      user_id: userId || context.migrationUserId,
+      texto: observacao.texto,
+      created_at: observacao.createdAt ? toDbTimestamp(observacao.createdAt) : undefined,
+    });
+  }
+
+  if (apply && rows.length) {
+    await context.supabase.insert('observacao', rows, { select: 'id' });
+  }
+
+  return { missing: rows.length };
+}
+
+async function syncMissingLegacyEvents(context, demandaId, history, apply) {
+  const existing = await context.supabase.select(
+    `demanda_evento?select=id,descricao,created_at,tipo&demanda_id=eq.${encodeEq(demandaId)}&tipo=eq.legado&limit=10000`,
+  );
+  const existingKeys = new Set((existing ?? []).map(legacyEventSyncKey).filter(Boolean));
+  const missingHistory = [];
+
+  for (const item of history ?? []) {
+    const key = legacyEventSyncKey(item);
+    if (!key || existingKeys.has(key)) continue;
+    existingKeys.add(key);
+    missingHistory.push(item);
+  }
+
+  if (apply && missingHistory.length) {
+    const rows = await buildEventRows(context, 'demanda', demandaId, missingHistory, null);
+    await context.supabase.insert('demanda_evento', rows, { select: 'id' });
+  }
+
+  return { missing: missingHistory.length };
+}
+
+async function syncLegacySubtarefas(context, demandaId, subtarefas, apply) {
+  const existing = await context.supabase.select(
+    `subtarefa?select=id,titulo,concluida,ordem,responsavel_user_id&demanda_id=eq.${encodeEq(demandaId)}&limit=10000`,
+  );
+  const existingByTitle = new Map();
+  for (const item of existing ?? []) {
+    const key = taskSyncKey(item.titulo);
+    if (key && !existingByTitle.has(key)) existingByTitle.set(key, item);
+  }
+
+  const inserts = [];
+  const updates = [];
+
+  for (const [index, subtarefa] of (subtarefas ?? []).entries()) {
+    const key = taskSyncKey(subtarefa.titulo);
+    if (!key) continue;
+
+    const current = existingByTitle.get(key);
+    if (!current) {
+      if (!apply) {
+        inserts.push(subtarefa);
+        continue;
+      }
+
+      const responsavelUserId = subtarefa.responsavelName
+        ? await resolveLegacySyncUserId(context, subtarefa.responsavelName)
+        : null;
+      inserts.push({
+        demanda_id: demandaId,
+        titulo: subtarefa.titulo,
+        concluida: !!subtarefa.concluida,
+        ordem: subtarefa.ordem ?? index,
+        responsavel_user_id: responsavelUserId || null,
+      });
+      continue;
+    }
+
+    const patch = {};
+    if (!!current.concluida !== !!subtarefa.concluida) patch.concluida = !!subtarefa.concluida;
+    if ((current.ordem ?? 0) !== (subtarefa.ordem ?? index)) patch.ordem = subtarefa.ordem ?? index;
+
+    if (apply && subtarefa.responsavelName) {
+      const responsavelUserId = await resolveLegacySyncUserId(context, subtarefa.responsavelName);
+      if ((current.responsavel_user_id || null) !== (responsavelUserId || null)) {
+        patch.responsavel_user_id = responsavelUserId || null;
+      }
+    }
+
+    if (Object.keys(patch).length) {
+      updates.push({ id: current.id, patch });
+    }
+  }
+
+  if (apply && inserts.length) {
+    await context.supabase.insert('subtarefa', inserts, { select: 'id' });
+  }
+  if (apply && updates.length) {
+    for (const item of updates) {
+      await context.supabase.patch(
+        'subtarefa',
+        `id=eq.${encodeEq(item.id)}&demanda_id=eq.${encodeEq(demandaId)}`,
+        item.patch,
+        { select: 'id' },
+      );
+    }
+  }
+
+  return { inserted: inserts.length, updated: updates.length };
+}
+
+async function syncOpenActiveDemandaDetails(context) {
+  const apply = context.options.apply === true;
+  const rows = limitArray(
+    await loadCurrentOpenActiveDemandasForSync(context.supabase),
+    context.options.limitDemands,
+  );
+  const totals = {
+    checked: 0,
+    failed: 0,
+    statusChanged: 0,
+    prazoChanged: 0,
+    observacoesMissing: 0,
+    eventosMissing: 0,
+    subtarefasInserted: 0,
+    subtarefasUpdated: 0,
+    demandaPatched: 0,
+  };
+  const samples = [];
+
+  console.log('modo --sync-open-active-details: conferindo somente demandas atuais em aberto/em andamento no novo.');
+  console.log(`modo: ${apply ? 'APPLY' : 'DRY-RUN'} | demandas encontradas: ${rows.length}`);
+
+  let index = 0;
+  await mapConcurrent(rows, context.options.concurrency, async (row) => {
+    index += 1;
+    if (index % 25 === 0 || index === rows.length) {
+      console.log(`  ...conferindo ${index}/${rows.length}`);
+    }
+
+    try {
+      const html = await context.legacy.get(`/painel/demandas/editar/${row.legacy_id}`);
+      const detail = parseLegacyDemandaDetail(html, String(row.legacy_id), {
+        legacyId: String(row.legacy_id),
+        protocolo: row.protocolo,
+        assunto: row.assunto,
+      });
+      const legacyStatus = mapLegacyStatus(detail.statusLegacy);
+      const latestObservation = newestDate(...(detail.observacoes ?? []).map((item) => item.createdAt));
+      const patch = {};
+      let changed = false;
+
+      totals.checked += 1;
+
+      if (legacyStatus && row.status !== legacyStatus) {
+        patch.status = legacyStatus;
+        if (legacyStatus === 'concluido') {
+          patch.resolvido_em = toDbTimestamp(detail.updatedAt || new Date().toISOString());
+        } else if (legacyStatus !== 'cancelado') {
+          patch.resolvido_em = null;
+        }
+        totals.statusChanged += 1;
+        changed = true;
+      }
+
+      if (detail.prazo && String(row.prazo ?? '').slice(0, 10) !== detail.prazo) {
+        patch.prazo = detail.prazo;
+        totals.prazoChanged += 1;
+        changed = true;
+      }
+
+      if (latestObservation && isLegacyTimestampNewer(latestObservation, row.ultima_observacao_em)) {
+        patch.ultima_observacao_em = toDbTimestamp(latestObservation);
+        changed = true;
+      }
+
+      const observacoes = await syncMissingLegacyObservacoes(context, row.id, detail.observacoes, apply);
+      const eventos = await syncMissingLegacyEvents(context, row.id, detail.history, apply);
+      const subtarefas = await syncLegacySubtarefas(context, row.id, detail.subtarefas, apply);
+
+      totals.observacoesMissing += observacoes.missing;
+      totals.eventosMissing += eventos.missing;
+      totals.subtarefasInserted += subtarefas.inserted;
+      totals.subtarefasUpdated += subtarefas.updated;
+
+      if (
+        changed
+        || observacoes.missing
+        || eventos.missing
+        || subtarefas.inserted
+        || subtarefas.updated
+      ) {
+        patch.updated_at = toDbTimestamp(detail.updatedAt || new Date().toISOString());
+      }
+
+      if (Object.keys(patch).length) {
+        totals.demandaPatched += 1;
+        if (apply) {
+          await context.supabase.patch('Demanda', `id=eq.${encodeEq(row.id)}`, patch, { select: 'id,status,prazo' });
+        }
+      }
+
+      if (samples.length < 12 && (Object.keys(patch).length || observacoes.missing || eventos.missing || subtarefas.inserted || subtarefas.updated)) {
+        samples.push({
+          legacyId: row.legacy_id,
+          protocolo: row.protocolo,
+          statusAtual: row.status,
+          statusLegado: legacyStatus,
+          prazoAtual: row.prazo,
+          prazoLegado: detail.prazo,
+          observacoesNovas: observacoes.missing,
+          eventosNovos: eventos.missing,
+          subtarefasNovas: subtarefas.inserted,
+          subtarefasAtualizadas: subtarefas.updated,
+        });
+      }
+    } catch (error) {
+      totals.failed += 1;
+      context.warnings.push(`demanda ${row.legacy_id}: falha ao sincronizar (${error instanceof Error ? error.message : String(error)}).`);
+    }
+  });
+
+  console.log('');
+  console.log('--- Resumo sync open/active ---');
+  console.log(`  conferidas: ${totals.checked}`);
+  console.log(`  falhas: ${totals.failed}`);
+  console.log(`  status diferentes: ${totals.statusChanged}`);
+  console.log(`  prazos diferentes: ${totals.prazoChanged}`);
+  console.log(`  observacoes faltantes: ${totals.observacoesMissing}`);
+  console.log(`  eventos de historico faltantes: ${totals.eventosMissing}`);
+  console.log(`  subtarefas/instrucoes novas: ${totals.subtarefasInserted}`);
+  console.log(`  subtarefas/instrucoes atualizadas: ${totals.subtarefasUpdated}`);
+  console.log(`  demandas com patch: ${totals.demandaPatched}`);
+  if (samples.length) {
+    console.log('  amostra:');
+    for (const sample of samples) console.log('   -', JSON.stringify(sample));
+  }
+  if (!apply) {
+    console.log('  (dry-run: reexecute com --apply para gravar.)');
+  }
+
+  return totals;
+}
+
+async function syncAllLegacyDemandaEvents(context) {
+  const apply = context.options.apply === true;
+  const rows = limitArray(
+    await loadAllDemandasWithLegacyId(context.supabase),
+    context.options.limitDemands,
+  );
+  const totals = {
+    checked: 0,
+    failed: 0,
+    eventosMissing: 0,
+    observacoesMissing: 0,
+  };
+  const samples = [];
+
+  console.log('modo --sync-all-legacy-events: puxa histórico (textarea) do legado para todas as demandas com legacy_id.');
+  console.log(`modo: ${apply ? 'APPLY' : 'DRY-RUN'} | demandas com vínculo legado: ${rows.length}`);
+
+  let index = 0;
+  await mapConcurrent(rows, context.options.concurrency, async (row) => {
+    index += 1;
+    if (index % 50 === 0 || index === rows.length) {
+      console.log(`  ...conferindo ${index}/${rows.length}`);
+    }
+
+    try {
+      const html = await context.legacy.get(`/painel/demandas/editar/${row.legacy_id}`);
+      const detail = parseLegacyDemandaDetail(html, String(row.legacy_id), {
+        legacyId: String(row.legacy_id),
+        protocolo: row.protocolo,
+        assunto: row.assunto,
+      });
+
+      totals.checked += 1;
+      const observacoes = await syncMissingLegacyObservacoes(context, row.id, detail.observacoes, apply);
+      const eventos = await syncMissingLegacyEvents(context, row.id, detail.history, apply);
+      totals.observacoesMissing += observacoes.missing;
+      totals.eventosMissing += eventos.missing;
+
+      if (samples.length < 12 && (eventos.missing || observacoes.missing)) {
+        samples.push({
+          legacyId: row.legacy_id,
+          protocolo: row.protocolo,
+          eventosMissing: eventos.missing,
+          observacoesMissing: observacoes.missing,
+        });
+      }
+    } catch (error) {
+      totals.failed += 1;
+      context.warnings.push(`demanda ${row.legacy_id}: falha ao sincronizar histórico (${error instanceof Error ? error.message : String(error)}).`);
+    }
+  });
+
+  console.log('');
+  console.log('--- Resumo sync all legacy events ---');
+  console.log(`  conferidas: ${totals.checked}`);
+  console.log(`  falhas: ${totals.failed}`);
+  console.log(`  eventos de histórico faltantes: ${totals.eventosMissing}`);
+  console.log(`  observações faltantes: ${totals.observacoesMissing}`);
+  if (samples.length) {
+    console.log('  amostra:');
+    for (const sample of samples) console.log('   -', JSON.stringify(sample));
+  }
+  if (!apply) {
+    console.log('  (dry-run: reexecute com --apply para gravar.)');
+  }
+
+  return totals;
+}
+
 function summarizeSnapshot(snapshot) {
   return {
     users: snapshot.users.length,
@@ -2398,6 +2889,45 @@ async function main() {
   let demandSummaries = [];
   const legacy = new LegacySession(LEGACY_BASE_URL);
   await legacy.login(legacyEmail, legacyPassword);
+
+  if (options.syncOpenActiveDetails || options.syncAllLegacyEvents) {
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      throw new Error('SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY sao obrigatorios para sincronizacao com o legado.');
+    }
+    const supabase = new SupabaseRestClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+    const warnings = [];
+    const context = {
+      supabase,
+      map: existingMap,
+      warnings,
+      legacy,
+      options,
+      reference: null,
+      userDirectory: null,
+      migrationUserId: null,
+    };
+
+    if (options.apply) {
+      console.log('coletando usuarios do legado para mapear observacoes/historico...');
+      const usersSnapshot = await collectLegacyUsers(legacy, options);
+      context.reference = await loadReferenceData(supabase);
+      context.userDirectory = buildUserDirectory(usersSnapshot);
+      context.migrationUserId = await ensureMigrationUser(context);
+    }
+
+    if (options.syncAllLegacyEvents) {
+      await syncAllLegacyDemandaEvents(context);
+    } else {
+      await syncOpenActiveDemandaDetails(context);
+    }
+    if (options.apply) await saveMap(existingMap);
+    if (warnings.length) {
+      console.log('');
+      console.log('Avisos:');
+      for (const warning of warnings) console.log(`- ${warning}`);
+    }
+    return;
+  }
 
   if (!options.syncStatusesOnly && (options.phases.has('users') || options.phases.has('templates') || options.phases.has('demandas'))) {
     console.log('coletando usuários do legado...');

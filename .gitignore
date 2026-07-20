@@ -40,3 +40,7 @@ backend-csharp/bin/
 backend-csharp/obj/
 backend-csharp-api/bin/
 backend-csharp-api/obj/
+*.log
+.*.log
+.backend-*.log
+!.env.example

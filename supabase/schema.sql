@@ -127,7 +127,9 @@ CREATE TABLE "subtarefa" (
   "titulo" TEXT NOT NULL,
   "concluida" BOOLEAN NOT NULL DEFAULT false,
   "ordem" INTEGER NOT NULL DEFAULT 0,
-  "responsavel_user_id" UUID REFERENCES "User"("id") ON DELETE SET NULL
+  "responsavel_user_id" UUID REFERENCES "User"("id") ON DELETE SET NULL,
+  "concluida_em" TIMESTAMP(3),
+  "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE "observacao" (

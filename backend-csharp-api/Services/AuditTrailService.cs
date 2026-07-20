@@ -113,6 +113,7 @@ public sealed class AuditTrailService
                     tipo = row.GetStringOrEmpty("tipo"),
                     descricao = row.GetStringOrEmpty("descricao"),
                     createdAt = NormalizeDate(row.GetNullableString("created_at")),
+                    metadata = row.GetOptionalProperty("metadata"),
                     user = user.ValueKind == JsonValueKind.Object
                         ? new
                         {

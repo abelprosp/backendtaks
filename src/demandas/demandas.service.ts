@@ -3,6 +3,7 @@ import OpenAI from 'openai';
 import { SupabaseService } from '../supabase/supabase.service';
 import * as fs from 'fs';
 import * as path from 'path';
+import { gunzipSync } from 'zlib';
 import { v4 as uuidv4 } from 'uuid';
 import { DemandaVisibilityService } from './demanda-visibility.service';
 import { RecorrenciaService } from './recorrencia.service';
@@ -11,9 +12,13 @@ import { MemoryTtlCache } from '../common/memory-ttl-cache';
 import { CreateDemandaDto } from './dto/create-demanda.dto';
 import { UpdateDemandaDto } from './dto/update-demanda.dto';
 import { ListDemandasFiltersDto } from './dto/list-demandas-filters.dto';
+import { CreateAnexoUploadUrlDto, FinalizeAnexoUploadDto } from './dto/create-anexo-upload.dto';
 import { CreateDemandaFromTemplateDto } from '../templates/dto/create-demanda-from-template.dto';
 import type { DemandaStatus } from '../types/enums';
 import { IaContextService } from '../ia-context/ia-context.service';
+import { normalizeDemandaMultilineText } from '../common/normalize-demanda-text';
+
+const DASHBOARD_BASELINE_TIMESTAMP = '2026-04-01T00:00:00';
 
 function computeTempoHoras(from: string | Date | null, to: string | Date | null): number | null {
   if (!from || !to) return null;
@@ -48,6 +53,39 @@ function getTodayInSaoPaulo(): string {
   return year && month && day ? `${year}-${month}-${day}` : new Date().toISOString().slice(0, 10);
 }
 
+/**
+ * Prazo da demanda e data base de recorrência são "dia de calendário" em America/Sao_Paulo.
+ * Evitar `toISOString()` no valor bruto: `new Date('yyyy-MM-dd')` é meia-noite UTC e o dia
+ * vira no fuso BR, divergindo do `<input type="date">` e do autosave no frontend.
+ */
+/** Coluna DATE: aceita yyyy-MM-dd ou ISO; grava só o dia civil inicial para evitar rejeição do PostgREST. */
+function normalizePrazoColumn(value: unknown): string | null {
+  if (value == null || value === '') return null;
+  const s = String(value).trim();
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : null;
+}
+
+function toCalendarDateOnlySaoPaulo(value: unknown): string | null {
+  if (value == null || value === '') return null;
+  const asText = String(value).trim();
+  if (!asText) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(asText)) return asText;
+  const hasTimePortion = /\d{4}-\d{2}-\d{2}(T|\s)\d/.test(asText);
+  const date = hasTimePortion ? new Date(asText) : new Date(`${asText.slice(0, 10)}T12:00:00Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const year = parts.find((p) => p.type === 'year')?.value ?? '';
+  const month = parts.find((p) => p.type === 'month')?.value ?? '';
+  const day = parts.find((p) => p.type === 'day')?.value ?? '';
+  return year && month && day ? `${year}-${month}-${day}` : null;
+}
+
 function ilikeContainsPattern(raw: string): string {
   const t = raw.trim();
   const escaped = t.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
@@ -75,7 +113,7 @@ function mapDemandaList(row: any, criador?: any, responsaveis?: any[], setores?:
     protocolo: row.protocolo,
     assunto: row.assunto,
     prioridade: row.prioridade,
-    prazo: row.prazo != null && row.prazo !== '' ? (toDateISO(row.prazo) ?? (typeof row.prazo === 'string' ? row.prazo : null)) : null,
+    prazo: toCalendarDateOnlySaoPaulo(row.prazo),
     status: row.status,
     criadorId: row.criador_id,
     observacoesGerais: row.observacoes_gerais,
@@ -238,10 +276,61 @@ export class DemandasService {
   private async gerarProtocolo(): Promise<string> {
     const sb = this.supabase.getClient();
     const year = new Date().getFullYear();
-    const start = `${year}-01-01`;
-    const end = `${year + 1}-01-01`;
-    const { count } = await sb.from('Demanda').select('*', { count: 'exact', head: true }).gte('created_at', start).lt('created_at', end);
-    return `LUX-${year}-${String((count ?? 0) + 1).padStart(5, '0')}`;
+    const prefix = `LUX-${year}-`;
+    const { data, error } = await sb
+      .from('Demanda')
+      .select('protocolo')
+      .like('protocolo', `${prefix}%`)
+      .limit(100000);
+    if (error) throw new Error(error.message);
+
+    const lastSequence = (data ?? [])
+      .map((row) => this.protocoloSequence(row?.protocolo, prefix))
+      .filter((sequence): sequence is number => sequence != null)
+      .reduce((max, sequence) => Math.max(max, sequence), 0);
+    return `${prefix}${String(lastSequence + 1).padStart(5, '0')}`;
+  }
+
+  private protocoloSequence(protocolo: string | null | undefined, prefix: string): number | null {
+    if (!protocolo || !protocolo.toUpperCase().startsWith(prefix.toUpperCase())) return null;
+    const sequence = Number.parseInt(protocolo.slice(prefix.length), 10);
+    return Number.isFinite(sequence) ? sequence : null;
+  }
+
+  private isDuplicateProtocoloError(error: unknown): boolean {
+    const candidate = error as { code?: string; message?: string; details?: string };
+    const text = [candidate?.code, candidate?.message, candidate?.details]
+      .filter(Boolean)
+      .join(' ');
+    return /Demanda_protocolo_key/i.test(text)
+      || (/23505/i.test(text) && /protocolo/i.test(text))
+      || (/duplicate key/i.test(text) && /protocolo/i.test(text));
+  }
+
+  private async insertDemandaWithGeneratedProtocolo(payload: Record<string, unknown>) {
+    const sb = this.supabase.getClient();
+    const maxAttempts = 8;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const protocolo = await this.gerarProtocolo();
+      const { data, error } = await sb
+        .from('Demanda')
+        .insert({ ...payload, protocolo })
+        .select()
+        .single();
+
+      if (!error) {
+        if (!data) throw new Error('Não foi possível criar a demanda.');
+        return data;
+      }
+
+      if (!this.isDuplicateProtocoloError(error) || attempt === maxAttempts - 1) {
+        throw new Error(error.message);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)));
+    }
+
+    throw new Error('Não foi possível gerar um protocolo único para a demanda.');
   }
 
   private getAnexosBucket(): string {
@@ -250,6 +339,38 @@ export class DemandasService {
 
   private buildSupabaseStoragePath(bucket: string, objectPath: string): string {
     return `supabase://${bucket}/${objectPath}`;
+  }
+
+  private buildCompressedSupabaseStoragePath(bucket: string, objectPath: string): string {
+    return `supabase+gzip://${bucket}/${objectPath}`;
+  }
+
+  private normalizeStorageObjectFilename(filename: string | null | undefined): string {
+    return String(filename || 'file')
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9._\-\s]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim() || 'file';
+  }
+
+  /**
+   * Alguns endpoints do legado falham com caracteres especiais no nome do arquivo
+   * enviado no multipart. Para evitar erro de upload, usamos um nome de transporte
+   * sanitizado apenas para o legado e preservamos o nome original no sistema novo.
+   */
+  private normalizeLegacyTransportFilename(filename: string | null | undefined): string {
+    const raw = String(filename || 'arquivo').trim() || 'arquivo';
+    const ext = path.extname(raw);
+    const base = path.basename(raw, ext);
+    const normalizedBase = base
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9._\-\s]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const normalizedExt = ext.replace(/[^a-zA-Z0-9.]/g, '');
+    return `${normalizedBase || 'arquivo'}${normalizedExt}`;
   }
 
   private buildLegacyStoragePath(legacyDemandaId: string, legacyAnexoId: string, downloadUrl: string): string {
@@ -268,21 +389,60 @@ export class DemandasService {
   }
 
   private parseAnexoStoragePath(storagePath: string | null | undefined):
-    | { mode: 'supabase'; bucket: string; objectPath: string }
+    | { mode: 'supabase'; bucket: string; objectPath: string; compressed: boolean }
     | { mode: 'local'; objectPath: string } {
     const raw = String(storagePath ?? '').trim();
-    if (raw.startsWith('supabase://')) {
-      const withoutProtocol = raw.slice('supabase://'.length);
+    const protocol = raw.startsWith('supabase+gzip://')
+      ? 'supabase+gzip://'
+      : raw.startsWith('supabase://')
+        ? 'supabase://'
+        : null;
+    if (protocol) {
+      const withoutProtocol = raw.slice(protocol.length);
       const slashIndex = withoutProtocol.indexOf('/');
       if (slashIndex > 0) {
         return {
           mode: 'supabase',
           bucket: withoutProtocol.slice(0, slashIndex),
           objectPath: withoutProtocol.slice(slashIndex + 1),
+          compressed: protocol === 'supabase+gzip://',
         };
       }
     }
     return { mode: 'local', objectPath: raw };
+  }
+
+  private normalizeInitialObservacoes(observacoes: string[] | undefined): string[] {
+    return Array.from(
+      new Set(
+        (observacoes ?? [])
+          .map((texto) => normalizeDemandaMultilineText(String(texto ?? '')).trim())
+          .filter(Boolean),
+      ),
+    );
+  }
+
+  private async insertInitialObservacoes(userId: string, demandaId: string, observacoes: string[] | undefined): Promise<void> {
+    const rows = this.normalizeInitialObservacoes(observacoes);
+    if (!rows.length) return;
+
+    const sb = this.supabase.getClient();
+    const createdAt = new Date().toISOString();
+    const { error } = await sb
+      .from('observacao')
+      .insert(rows.map((texto) => ({
+        demanda_id: demandaId,
+        user_id: userId,
+        texto,
+        created_at: createdAt,
+      })));
+    if (error) throw new Error(error.message);
+
+    const { error: updateError } = await sb
+      .from('Demanda')
+      .update({ ultima_observacao_em: createdAt })
+      .eq('id', demandaId);
+    if (updateError) throw new Error(updateError.message);
   }
 
   private async ensureAnexosBucket(): Promise<string> {
@@ -863,9 +1023,7 @@ export class DemandasService {
       anexos: this.enrichAnexosWithAudit(this.parseRpcJsonArray(row?.anexos), attachmentAuditLookup),
       recorrenciaConfig: rec
         ? {
-            dataBase:
-              toDateISO(rec.data_base) ??
-              (typeof rec.data_base === 'string' ? rec.data_base : null),
+            dataBase: toCalendarDateOnlySaoPaulo(rec.data_base),
             tipo: rec.tipo ?? '',
             prazoReaberturaDias: rec.prazo_reabertura_dias ?? 0,
           }
@@ -986,25 +1144,22 @@ export class DemandasService {
 
   async create(userId: string, dto: CreateDemandaDto) {
     const sb = this.supabase.getClient();
-    const protocolo = await this.gerarProtocolo();
     const status = (dto.status as DemandaStatus) || 'em_aberto';
-    const { data: demanda, error } = await sb
-      .from('Demanda')
-      .insert({
-        protocolo,
-        assunto: dto.assunto,
-        prioridade: dto.prioridade ?? false,
-        prazo: dto.prazo ?? null,
-        status,
-        criador_id: userId,
-        observacoes_gerais: dto.observacoesGerais ?? null,
-        is_privada: dto.isPrivada ?? false,
-        private_owner_user_id: dto.isPrivada ? userId : null,
-        is_recorrente: dto.isRecorrente ?? false,
-      })
-      .select()
-      .single();
-    if (error) throw new Error(error.message);
+    const observacoesGeralNorm =
+      dto.observacoesGerais == null
+        ? null
+        : normalizeDemandaMultilineText(String(dto.observacoesGerais)).trim() || null;
+    const demanda = await this.insertDemandaWithGeneratedProtocolo({
+      assunto: dto.assunto,
+      prioridade: dto.prioridade ?? false,
+      prazo: dto.prazo ?? null,
+      status,
+      criador_id: userId,
+      observacoes_gerais: observacoesGeralNorm,
+      is_privada: dto.isPrivada ?? false,
+      private_owner_user_id: dto.isPrivada ? userId : null,
+      is_recorrente: dto.isRecorrente ?? false,
+    });
     if (dto.setores?.length) await sb.from('demanda_setor').insert(dto.setores.map((setorId) => ({ demanda_id: demanda.id, setor_id: setorId })));
     if (dto.clienteIds?.length) await sb.from('demanda_cliente').insert(dto.clienteIds.map((clienteId) => ({ demanda_id: demanda.id, cliente_id: clienteId })));
     if (dto.responsaveis?.length) await sb.from('demanda_responsavel').insert(dto.responsaveis.map((r) => ({ demanda_id: demanda.id, user_id: r.userId, is_principal: r.isPrincipal ?? false })));
@@ -1015,18 +1170,38 @@ export class DemandasService {
       await sb.from('subtarefa').insert(
         dto.subtarefas.map((t, i) => ({
           demanda_id: demanda.id,
-          titulo: t.titulo,
+          titulo: normalizeDemandaMultilineText(String((t as any).titulo ?? '')),
           ordem: (t as any).ordem ?? i,
           responsavel_user_id: (t as any).responsavelUserId ?? null,
         })),
       );
     }
+    await this.insertInitialObservacoes(userId, demanda.id, dto.observacoes);
     if (dto.isRecorrente && dto.recorrencia) {
       await sb.from('recorrencia_config').insert({
         demanda_id: demanda.id,
         data_base: dto.recorrencia.dataBase,
         tipo: dto.recorrencia.tipo,
         prazo_reabertura_dias: dto.recorrencia.prazoReaberturaDias ?? 0,
+      });
+      await sb.from('demanda_evento').insert({
+        demanda_id: demanda.id,
+        user_id: userId,
+        tipo: 'demanda_recorrencia_configurada',
+        descricao: 'Demanda marcada como recorrente.',
+        metadata: {
+          title: 'Recorrência configurada',
+          summary: `Recorrência ${dto.recorrencia.tipo} a partir de ${dto.recorrencia.dataBase}.`,
+          tipo: dto.recorrencia.tipo,
+          dataBase: dto.recorrencia.dataBase,
+          prazoReaberturaDias: dto.recorrencia.prazoReaberturaDias ?? 0,
+          entries: [
+            { label: 'Tipo', value: dto.recorrencia.tipo },
+            { label: 'Data base', value: dto.recorrencia.dataBase },
+            { label: 'Prazo para reabertura', value: `${dto.recorrencia.prazoReaberturaDias ?? 0} dia(s)` },
+          ],
+        },
+        created_at: new Date().toISOString(),
       });
     }
     this.visibility.clearVisibleDemandaIdsCache();
@@ -1036,12 +1211,24 @@ export class DemandasService {
 
   async createFromTemplate(userId: string, templateId: string, dto: CreateDemandaFromTemplateDto) {
     const template = await this.templatesService.getForDemanda(templateId) as any;
-    const protocolo = await this.gerarProtocolo();
     const prioridade = dto.prioridade ?? template.prioridadeDefault;
-    const observacoesGerais = dto.observacoesGerais ?? template.observacoesGeraisTemplate ?? undefined;
+    const observacoesGeraisRaw = dto.observacoesGerais ?? template.observacoesGeraisTemplate ?? undefined;
+    const observacoesGerais =
+      observacoesGeraisRaw !== undefined && observacoesGeraisRaw !== null
+        ? normalizeDemandaMultilineText(String(observacoesGeraisRaw)).trim() || null
+        : undefined;
     const recorrenciaDataBase = dto.recorrenciaDataBase ?? template.recorrenciaDataBaseDefault ?? undefined;
     const isRecorrente = !!recorrenciaDataBase && !!template.isRecorrenteDefault && !!template.recorrenciaTipo;
     const setorIds = (dto.setorIds?.length ? dto.setorIds : template.setores?.map((s: any) => s.setor?.id ?? s.setorId)?.filter(Boolean)) ?? [];
+    const clienteIds = [
+      ...new Set(
+        (
+          dto.clienteIds !== undefined
+            ? dto.clienteIds
+            : template.clientes?.map((c: any) => c.cliente?.id ?? c.clienteId ?? c.id)?.filter(Boolean)
+        ) ?? [],
+      ),
+    ];
     const responsaveisDto = (dto.responsaveis?.length ? dto.responsaveis : template.responsaveis?.map((r: any) => ({ userId: r.userId ?? r.user?.id, isPrincipal: r.isPrincipal ?? false }))) ?? [];
     const subtarefasTemplate = (
       dto.subtarefas?.length
@@ -1053,26 +1240,20 @@ export class DemandasService {
     ) ?? [];
 
     const sb = this.supabase.getClient();
-    const { data: demanda, error } = await sb
-      .from('Demanda')
-      .insert({
-        protocolo,
-        assunto: dto.assunto,
-        prioridade,
-        prazo: dto.prazo ?? null,
-        status: 'em_aberto',
-        criador_id: userId,
-        observacoes_gerais: observacoesGerais ?? null,
-        is_privada: dto.isPrivada ?? false,
-        private_owner_user_id: dto.isPrivada ? userId : null,
-        is_recorrente: isRecorrente,
-      })
-      .select()
-      .single();
-    if (error) throw new Error(error.message);
+    const demanda = await this.insertDemandaWithGeneratedProtocolo({
+      assunto: dto.assunto,
+      prioridade,
+      prazo: dto.prazo ?? null,
+      status: 'em_aberto',
+      criador_id: userId,
+      observacoes_gerais: observacoesGerais !== undefined ? observacoesGerais : null,
+      is_privada: dto.isPrivada ?? false,
+      private_owner_user_id: dto.isPrivada ? userId : null,
+      is_recorrente: isRecorrente,
+    });
 
     if (setorIds.length) await sb.from('demanda_setor').insert(setorIds.map((setorId: string) => ({ demanda_id: demanda.id, setor_id: setorId })));
-    if (dto.clienteIds?.length) await sb.from('demanda_cliente').insert(dto.clienteIds.map((clienteId) => ({ demanda_id: demanda.id, cliente_id: clienteId })));
+    if (clienteIds.length) await sb.from('demanda_cliente').insert(clienteIds.map((clienteId) => ({ demanda_id: demanda.id, cliente_id: clienteId })));
     if (responsaveisDto.length) await sb.from('demanda_responsavel').insert(responsaveisDto.map((r: any) => ({ demanda_id: demanda.id, user_id: r.userId, is_principal: r.isPrincipal ?? false })));
     if (dto.privateViewerIds?.length) {
       await sb.from('demanda_private_viewer').insert([...new Set(dto.privateViewerIds)].map((viewerId) => ({ demanda_id: demanda.id, user_id: viewerId })));
@@ -1081,18 +1262,38 @@ export class DemandasService {
       await sb.from('subtarefa').insert(
         subtarefasTemplate.map((t: any, i: number) => ({
           demanda_id: demanda.id,
-          titulo: t.titulo,
+          titulo: normalizeDemandaMultilineText(String(t?.titulo ?? '')),
           ordem: i,
           responsavel_user_id: t.responsavelUserId ?? null,
         })),
       );
     }
+    await this.insertInitialObservacoes(userId, demanda.id, dto.observacoes);
     if (isRecorrente && recorrenciaDataBase && template.recorrenciaTipo) {
       await sb.from('recorrencia_config').insert({
         demanda_id: demanda.id,
         data_base: recorrenciaDataBase,
         tipo: template.recorrenciaTipo,
         prazo_reabertura_dias: template.recorrenciaPrazoReaberturaDias ?? 0,
+      });
+      await sb.from('demanda_evento').insert({
+        demanda_id: demanda.id,
+        user_id: userId,
+        tipo: 'demanda_recorrencia_configurada',
+        descricao: 'Demanda marcada como recorrente a partir do template.',
+        metadata: {
+          title: 'Recorrência configurada',
+          summary: `Recorrência ${template.recorrenciaTipo} a partir de ${recorrenciaDataBase}.`,
+          tipo: template.recorrenciaTipo,
+          dataBase: recorrenciaDataBase,
+          prazoReaberturaDias: template.recorrenciaPrazoReaberturaDias ?? 0,
+          entries: [
+            { label: 'Tipo', value: template.recorrenciaTipo },
+            { label: 'Data base', value: recorrenciaDataBase },
+            { label: 'Prazo para reabertura', value: `${template.recorrenciaPrazoReaberturaDias ?? 0} dia(s)` },
+          ],
+        },
+        created_at: new Date().toISOString(),
       });
     }
     this.visibility.clearVisibleDemandaIdsCache();
@@ -1996,10 +2197,10 @@ export class DemandasService {
     if (filters.prazoAte) q = q.lte('prazo', filters.prazoAte);
     const todayInSaoPaulo = getTodayInSaoPaulo();
     if (filters.condicaoPrazo === 'vencido') {
-      q = q.neq('status', 'concluido').neq('status', 'cancelado').lt('prazo', todayInSaoPaulo);
+      q = q.neq('status', 'concluido').neq('status', 'cancelado').lte('prazo', todayInSaoPaulo);
     }
     if (filters.condicaoPrazo === 'no_prazo') {
-      q = q.neq('status', 'concluido').neq('status', 'cancelado').gte('prazo', todayInSaoPaulo);
+      q = q.neq('status', 'concluido').neq('status', 'cancelado').gt('prazo', todayInSaoPaulo);
     }
     if (filters.condicaoPrazo === 'finalizada') q = q.in('status', ['concluido', 'cancelado']);
     if (filters.dataCriacaoDe) q = q.gte('created_at', filters.dataCriacaoDe);
@@ -2030,6 +2231,8 @@ export class DemandasService {
   }
 
   async list(userId: string, filters: ListDemandasFiltersDto) {
+    await this.recorrencia.reabrirDemandasVencidas();
+
     const needsVisibleIdPrefetch =
       !!filters.responsavelPrincipalId ||
       (filters.ocultarStandby === true && filters.status !== 'standby') ||
@@ -2079,6 +2282,8 @@ export class DemandasService {
   }
 
   async findOne(userId: string, id: string) {
+    await this.recorrencia.reabrirDemandasVencidas();
+
     const sb = this.supabase.getClient();
     const { data: row } = await sb.from('Demanda').select('*').eq('id', id).single();
     if (!row) throw new NotFoundException('Demanda não encontrada');
@@ -2104,34 +2309,60 @@ export class DemandasService {
       observacoes: rel.observacoesByDemanda.get(id) ?? [],
       anexos: this.enrichAnexosWithAudit(rel.anexosByDemanda.get(id) ?? [], attachmentAuditLookup),
       recorrenciaConfig: rec
-        ? { dataBase: toDateISO(rec.data_base) ?? (typeof rec.data_base === 'string' ? rec.data_base : null), tipo: rec.tipo ?? '', prazoReaberturaDias: rec.prazo_reabertura_dias ?? 0 }
+        ? {
+            dataBase: toCalendarDateOnlySaoPaulo(rec.data_base),
+            tipo: rec.tipo ?? '',
+            prazoReaberturaDias: rec.prazo_reabertura_dias ?? 0,
+          }
         : null,
     };
   }
 
+  /** Só existência + permissão; evita carregar relações duas vezes em add/update/delete de observação. */
+  private async ensureDemandaViewAccessForMutation(userId: string, demandaId: string): Promise<void> {
+    const sb = this.supabase.getClient();
+    const { data: row } = await sb.from('Demanda').select('id, criador_id').eq('id', demandaId).maybeSingle();
+    if (!row?.id) throw new NotFoundException('Demanda não encontrada');
+    const can = await this.visibility.canViewDemanda(userId, demandaId, row.criador_id ?? null);
+    if (!can) throw new ForbiddenException('Sem permissão para ver esta demanda');
+  }
+
   async update(userId: string, id: string, dto: UpdateDemandaDto) {
     await this.findOne(userId, id);
-    const isResponsavel = await this.isResponsavelPrincipal(userId, id);
-    let newStatus = dto.status as DemandaStatus | undefined;
-    if (newStatus && !isResponsavel && newStatus !== 'standby') newStatus = 'standby';
+    const newStatus = dto.status as DemandaStatus | undefined;
 
     const sb = this.supabase.getClient();
     const upd: any = {};
     if (dto.assunto != null) upd.assunto = dto.assunto;
     if (dto.prioridade !== undefined) upd.prioridade = dto.prioridade;
-    if (dto.prazo != null) upd.prazo = dto.prazo;
+    if (dto.prazo !== undefined) {
+      upd.prazo = normalizePrazoColumn(dto.prazo);
+    }
     if (newStatus) {
       upd.status = newStatus;
       if (newStatus === 'concluido') upd.resolvido_em = new Date().toISOString();
       else upd.resolvido_em = null;
     }
-    if (dto.observacoesGerais !== undefined) upd.observacoes_gerais = dto.observacoesGerais;
+    const resolvedAtOnComplete =
+      newStatus === 'concluido' && typeof upd.resolvido_em === 'string' ? upd.resolvido_em : null;
+    if (dto.observacoesGerais !== undefined) {
+      upd.observacoes_gerais =
+        dto.observacoesGerais == null ? null : normalizeDemandaMultilineText(String(dto.observacoesGerais)).trim() || null;
+    }
     if (dto.isPrivada !== undefined) {
       upd.is_privada = dto.isPrivada;
       upd.private_owner_user_id = dto.isPrivada ? userId : null;
     }
     if (dto.isRecorrente !== undefined) upd.is_recorrente = dto.isRecorrente;
-    if (Object.keys(upd).length) await sb.from('Demanda').update(upd).eq('id', id);
+    if (Object.keys(upd).length) {
+      const { error: demandaUpdateError } = await sb.from('Demanda').update(upd).eq('id', id);
+      if (demandaUpdateError) {
+        throw new BadRequestException(demandaUpdateError.message || 'Não foi possível atualizar a demanda.');
+      }
+    }
+    if (resolvedAtOnComplete) {
+      await this.recorrencia.fulfillCycleOnCompletion(id, resolvedAtOnComplete);
+    }
 
     if (dto.setores) {
       await sb.from('demanda_setor').delete().eq('demanda_id', id);
@@ -2150,18 +2381,18 @@ export class DemandasService {
       if (dto.privateViewerIds.length) await sb.from('demanda_private_viewer').insert([...new Set(dto.privateViewerIds)].map((viewerId) => ({ demanda_id: id, user_id: viewerId })));
     }
     if (dto.subtarefas) {
-      await sb.from('subtarefa').delete().eq('demanda_id', id);
-      if (dto.subtarefas.length) {
-        await sb.from('subtarefa').insert(
-          dto.subtarefas.map((t, i) => ({
-            demanda_id: id,
-            titulo: t.titulo,
-            concluida: t.concluida ?? false,
-            ordem: (t as any).ordem ?? i,
-            responsavel_user_id: (t as any).responsavelUserId ?? null,
-          })),
-        );
-      }
+      const { syncDemandaSubtarefas } = await import('./subtarefa-sync');
+      await syncDemandaSubtarefas(
+        sb,
+        id,
+        dto.subtarefas.map((t, i) => ({
+          id: (t as { id?: string }).id,
+          titulo: normalizeDemandaMultilineText(String((t as { titulo?: string }).titulo ?? '')),
+          concluida: t.concluida ?? false,
+          ordem: (t as { ordem?: number }).ordem ?? i,
+          responsavelUserId: (t as { responsavelUserId?: string | null }).responsavelUserId ?? null,
+        })),
+      );
     }
     if (dto.recorrencia) {
       const dataBase = dto.recorrencia.dataBase;
@@ -2183,8 +2414,39 @@ export class DemandasService {
         });
       }
       await sb.from('Demanda').update({ is_recorrente: true }).eq('id', id);
+      await sb.from('demanda_evento').insert({
+        demanda_id: id,
+        user_id: userId,
+        tipo: 'demanda_recorrencia_configurada',
+        descricao: 'Recorrência configurada/atualizada para a demanda.',
+        metadata: {
+          title: 'Recorrência configurada',
+          summary: `Recorrência ${tipo} a partir de ${dataBase}.`,
+          tipo,
+          dataBase,
+          prazoReaberturaDias,
+          entries: [
+            { label: 'Tipo', value: tipo },
+            { label: 'Data base', value: dataBase },
+            { label: 'Prazo para reabertura', value: `${prazoReaberturaDias} dia(s)` },
+          ],
+        },
+        created_at: new Date().toISOString(),
+      });
     } else if (dto.isRecorrente === false) {
       await sb.from('recorrencia_config').delete().eq('demanda_id', id);
+      await sb.from('demanda_evento').insert({
+        demanda_id: id,
+        user_id: userId,
+        tipo: 'demanda_recorrencia_removida',
+        descricao: 'Recorrência removida da demanda.',
+        metadata: {
+          title: 'Recorrência removida',
+          summary: 'A demanda deixou de ser recorrente.',
+          entries: [{ label: 'Estado', value: 'Removida' }],
+        },
+        created_at: new Date().toISOString(),
+      });
     }
     this.visibility.clearVisibleDemandaIdsCache();
     return this.findOne(userId, id);
@@ -2201,59 +2463,127 @@ export class DemandasService {
   }
 
   async addObservacao(userId: string, demandaId: string, texto: string) {
-    await this.findOne(userId, demandaId);
-    if (!texto?.trim()) throw new BadRequestException('Informe o texto da observação.');
+    await this.ensureDemandaViewAccessForMutation(userId, demandaId);
+    const normalizedText = normalizeDemandaMultilineText(String(texto ?? '')).trim();
+    if (!normalizedText) throw new BadRequestException('Informe o texto da observação.');
     const sb = this.supabase.getClient();
-    const isResponsavel = await this.isResponsavelPrincipal(userId, demandaId);
-    await sb.from('observacao').insert({ demanda_id: demandaId, user_id: userId, texto: texto.trim() });
-    const demandaUpd: { status?: string; ultima_observacao_em: string } = { ultima_observacao_em: new Date().toISOString() };
-    if (!isResponsavel) demandaUpd.status = 'standby';
+    await sb.from('observacao').insert({ demanda_id: demandaId, user_id: userId, texto: normalizedText });
+    const demandaUpd: { ultima_observacao_em: string } = { ultima_observacao_em: new Date().toISOString() };
     await sb.from('Demanda').update(demandaUpd).eq('id', demandaId);
+    await sb.from('demanda_evento').insert({
+      demanda_id: demandaId,
+      user_id: userId,
+      tipo: 'observacao_adicionada',
+      descricao: `Observacao adicionada: "${normalizedText.slice(0, 160)}"${normalizedText.length > 160 ? '...' : ''}`,
+      metadata: {
+        title: 'Observacao adicionada',
+        summary: normalizedText.slice(0, 120),
+        entries: [
+          { label: 'Texto', value: normalizedText },
+        ],
+      },
+      created_at: new Date().toISOString(),
+    });
     return this.findOne(userId, demandaId);
   }
 
   async updateObservacao(userId: string, demandaId: string, observacaoId: string, texto: string) {
-    await this.findOne(userId, demandaId);
-    if (!texto?.trim()) throw new BadRequestException('Informe o texto da observação.');
+    await this.ensureDemandaViewAccessForMutation(userId, demandaId);
+    const normalizedText = normalizeDemandaMultilineText(String(texto ?? '')).trim();
+    if (!normalizedText) throw new BadRequestException('Informe o texto da observação.');
     const sb = this.supabase.getClient();
     const { data: observacao } = await sb
       .from('observacao')
-      .select('id, user_id')
+      .select('id, user_id, texto')
       .eq('id', observacaoId)
       .eq('demanda_id', demandaId)
       .single();
     if (!observacao?.id) throw new NotFoundException('Observação não encontrada');
 
-    const isResponsavel = await this.isResponsavelPrincipal(userId, demandaId);
-    if (String(observacao.user_id) !== userId && !isResponsavel) {
-      throw new ForbiddenException('Sem permissão para editar esta observação.');
-    }
-
     const { error } = await sb
       .from('observacao')
-      .update({ texto: texto.trim() })
+      .update({ texto: normalizedText })
       .eq('id', observacaoId)
       .eq('demanda_id', demandaId);
     if (error) throw new Error(error.message);
+    const beforeText = String((observacao as any).texto ?? '').trim();
+    await sb.from('demanda_evento').insert({
+      demanda_id: demandaId,
+      user_id: userId,
+      tipo: 'observacao_editada',
+      descricao: `Observacao editada: "${normalizedText.slice(0, 160)}"${normalizedText.length > 160 ? '...' : ''}`,
+      metadata: {
+        title: 'Observacao editada',
+        summary: normalizedText.slice(0, 120),
+        entries: [
+          { label: 'Antes', value: beforeText || 'Sem texto' },
+          { label: 'Depois', value: normalizedText },
+        ],
+      },
+      created_at: new Date().toISOString(),
+    });
+    return this.findOne(userId, demandaId);
+  }
+
+  async deleteObservacao(userId: string, demandaId: string, observacaoId: string) {
+    await this.ensureDemandaViewAccessForMutation(userId, demandaId);
+    const sb = this.supabase.getClient();
+    const { data: observacao } = await sb
+      .from('observacao')
+      .select('id, texto')
+      .eq('id', observacaoId)
+      .eq('demanda_id', demandaId)
+      .maybeSingle();
+    if (!observacao?.id) throw new NotFoundException('Observação não encontrada');
+
+    const beforeText = normalizeDemandaMultilineText(String((observacao as any).texto ?? ''));
+
+    const { error } = await sb.from('observacao').delete().eq('id', observacaoId).eq('demanda_id', demandaId);
+    if (error) throw new Error(error.message);
+
+    const { data: lastObs } = await sb
+      .from('observacao')
+      .select('created_at')
+      .eq('demanda_id', demandaId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    await sb.from('Demanda').update({ ultima_observacao_em: lastObs?.created_at ?? null }).eq('id', demandaId);
+
+    await sb.from('demanda_evento').insert({
+      demanda_id: demandaId,
+      user_id: userId,
+      tipo: 'observacao_removida',
+      descricao: 'Observação removida.',
+      metadata: {
+        title: 'Observação removida',
+        summary: beforeText.slice(0, 120),
+        entries: [{ label: 'Texto removido', value: beforeText || '(vazio)' }],
+      },
+      created_at: new Date().toISOString(),
+    });
+    this.visibility.clearVisibleDemandaIdsCache();
     return this.findOne(userId, demandaId);
   }
 
   async addAnexo(userId: string, demandaId: string, file: Express.Multer.File, nome?: string) {
     await this.findOne(userId, demandaId);
     if (!file?.buffer?.length) throw new BadRequestException('Arquivo inválido.');
+    const originalFilename = file.originalname || 'file';
     const legacyDemandaId = await this.resolveLegacyDemandaId(demandaId);
     if (this.preferLegacyAttachments() && legacyDemandaId && this.hasLegacyCredentials()) {
+      const legacyTransportFilename = this.normalizeLegacyTransportFilename(originalFilename);
       const legacy = await this.uploadLegacyAttachment(
         legacyDemandaId,
         file.buffer,
-        file.originalname || 'file',
-        nome?.trim() || file.originalname || 'file',
+        legacyTransportFilename,
+        nome?.trim() || originalFilename,
         file.mimetype || 'application/octet-stream',
       );
       const sb = this.supabase.getClient();
       // Preserva o nome original do arquivo enviado pelo usuário; o legado pode sanitizar
       // (ex.: trocar acentos/espaços por underline), mas isso só vale para o storage_path.
-      const preservedFilename = file.originalname || legacy.filename || 'file';
+      const preservedFilename = originalFilename || legacy.filename || 'file';
       const { data, error } = await sb
         .from('anexo')
         .insert({
@@ -2277,10 +2607,9 @@ export class DemandasService {
     if (this.requireLegacyAttachments()) {
       throw new BadRequestException('Esta demanda ainda nÃ£o possui vÃ­nculo com uma demanda do sistema antigo para armazenar anexos no legado.');
     }
-    const safeName = `${uuidv4()}-${(file.originalname || 'file').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
     const sb = this.supabase.getClient();
     const bucket = await this.ensureAnexosBucket();
-    const objectPath = ['demandas', demandaId, safeName].join('/');
+    const objectPath = ['demandas', demandaId, uuidv4(), this.normalizeStorageObjectFilename(originalFilename)].join('/');
     const { error: uploadError } = await sb.storage
       .from(bucket)
       .upload(objectPath, file.buffer, {
@@ -2292,7 +2621,7 @@ export class DemandasService {
       .from('anexo')
       .insert({
         demanda_id: demandaId,
-        filename: file.originalname || 'file',
+        filename: originalFilename,
         mime_type: file.mimetype || 'application/octet-stream',
         size: file.size,
         storage_path: this.buildSupabaseStoragePath(bucket, objectPath),
@@ -2303,6 +2632,89 @@ export class DemandasService {
     const audit = await this.insertAttachmentAudit(demandaId, userId, data.id, data.filename, nome?.trim() || data.filename);
     return {
       ...data,
+      displayName: audit.displayName,
+      createdAt: audit.createdAt,
+      createdBy: audit.createdBy,
+    };
+  }
+
+  async createAnexoUploadUrl(userId: string, demandaId: string, dto: CreateAnexoUploadUrlDto) {
+    await this.findOne(userId, demandaId);
+    if (this.requireLegacyAttachments()) {
+      throw new BadRequestException('Esta demanda ainda nao possui vinculo com uma demanda do sistema antigo para armazenar anexos no legado.');
+    }
+
+    const originalFilename = String(dto.filename || 'file').trim() || 'file';
+    const normalizedFilename = this.normalizeStorageObjectFilename(originalFilename);
+    const storedFilename = dto.compressed ? `${normalizedFilename}.gz` : normalizedFilename;
+    const bucket = await this.ensureAnexosBucket();
+    const objectPath = ['demandas', demandaId, uuidv4(), storedFilename].join('/');
+    const { data, error } = await this.supabase.getClient()
+      .storage
+      .from(bucket)
+      .createSignedUploadUrl(objectPath, { upsert: false });
+
+    if (error || !data) {
+      throw new ServiceUnavailableException(error?.message || 'Erro ao preparar o upload do anexo.');
+    }
+
+    return {
+      bucket,
+      objectPath,
+      signedUrl: data.signedUrl,
+      token: data.token,
+      path: data.path,
+      storagePath: dto.compressed
+        ? this.buildCompressedSupabaseStoragePath(bucket, objectPath)
+        : this.buildSupabaseStoragePath(bucket, objectPath),
+    };
+  }
+
+  async finalizeAnexoUpload(userId: string, demandaId: string, dto: FinalizeAnexoUploadDto) {
+    await this.findOne(userId, demandaId);
+
+    const originalFilename = String(dto.originalFilename || 'file').trim() || 'file';
+    const objectPath = String(dto.objectPath || '').trim();
+    const expectedPrefix = `demandas/${demandaId}/`;
+    if (!objectPath.startsWith(expectedPrefix) || objectPath.includes('..') || objectPath.includes('\\')) {
+      throw new BadRequestException('Caminho de upload invalido.');
+    }
+
+    const sb = this.supabase.getClient();
+    const bucket = await this.ensureAnexosBucket();
+    const { data: info, error: infoError } = await sb.storage.from(bucket).info(objectPath);
+    if (infoError || !info) {
+      throw new BadRequestException('Arquivo enviado nao foi encontrado para finalizar o anexo.');
+    }
+
+    const storagePath = dto.compressed
+      ? this.buildCompressedSupabaseStoragePath(bucket, objectPath)
+      : this.buildSupabaseStoragePath(bucket, objectPath);
+
+    let created: any = null;
+    try {
+      const { data, error } = await sb
+        .from('anexo')
+        .insert({
+          demanda_id: demandaId,
+          filename: originalFilename,
+          mime_type: dto.mimeType || this.guessMimeType(originalFilename) || 'application/octet-stream',
+          size: dto.originalSize,
+          storage_path: storagePath,
+        })
+        .select()
+        .single();
+      if (error) throw new Error(error.message);
+      created = data;
+    } catch (error) {
+      await sb.storage.from(bucket).remove([objectPath]);
+      throw error;
+    }
+
+    const displayName = dto.displayName?.trim() || created.filename;
+    const audit = await this.insertAttachmentAudit(demandaId, userId, created.id, created.filename, displayName);
+    return {
+      ...created,
       displayName: audit.displayName,
       createdAt: audit.createdAt,
       createdBy: audit.createdBy,
@@ -2329,7 +2741,15 @@ export class DemandasService {
         .from(storageLocation.bucket)
         .download(storageLocation.objectPath);
       if (error || !fileData) throw new NotFoundException('Arquivo não encontrado');
-      const buffer = Buffer.from(await fileData.arrayBuffer());
+      const storedBuffer = Buffer.from(await fileData.arrayBuffer());
+      let buffer = storedBuffer;
+      if (storageLocation.compressed) {
+        try {
+          buffer = gunzipSync(storedBuffer);
+        } catch {
+          throw new ServiceUnavailableException('Nao foi possivel descompactar o anexo.');
+        }
+      }
       return { buffer, filename: anexo.filename, mimeType: anexo.mime_type };
     }
     const uploadDir = process.env.UPLOAD_DIR || './uploads';
@@ -2489,14 +2909,17 @@ export class DemandasService {
     if (!legacyId) return;
 
     const sb = this.supabase.getClient();
-    const { data: existing } = await sb.from('anexo').select('id').eq('demanda_id', demandaId).limit(1);
-    if (existing?.length) return;
+    const { data: existingRows } = await sb.from('anexo').select('storage_path').eq('demanda_id', demandaId);
+    const existingPaths = new Set(
+      (existingRows ?? [])
+        .map((row) => String(row.storage_path ?? '').trim())
+        .filter(Boolean),
+    );
 
     try {
       const anexos = await this.listLegacyAttachments(legacyId);
       for (const item of anexos) {
-        const { data: duplicate } = await sb.from('anexo').select('id').eq('storage_path', item.storagePath).limit(1);
-        if (duplicate?.length) continue;
+        if (!item.storagePath || existingPaths.has(item.storagePath)) continue;
         await sb.from('anexo').insert({
           demanda_id: demandaId,
           filename: item.filename || 'Anexo legado',
@@ -2504,8 +2927,13 @@ export class DemandasService {
           size: 0,
           storage_path: item.storagePath,
         });
+        existingPaths.add(item.storagePath);
       }
-    } catch {
+    } catch (error) {
+      console.warn(
+        `[demandas] Falha ao vincular anexos legado ${legacyId} (demanda ${demandaId}):`,
+        error instanceof Error ? error.message : error,
+      );
       return;
     }
   }
@@ -2530,31 +2958,24 @@ export class DemandasService {
     return map[ext] || 'application/octet-stream';
   }
 
-  private async createLegacySession(): Promise<{ cookie: string }> {
+  private async createLegacySession() {
     if (!this.hasLegacyCredentials()) throw new ServiceUnavailableException('Integração com anexos do legado não configurada.');
-    const base = this.legacyBaseUrl();
-    const loginPage = await fetch(`${base}/login`);
-    const cookie = this.readSetCookie(loginPage);
-    const html = await loginPage.text();
-    const token = this.extractInputValue(html, '_token');
-    if (!token) throw new ServiceUnavailableException('Não foi possível ler o token de login do legado.');
-    const body = new URLSearchParams({
-      _token: token,
-      email: process.env.LEGACY_EMAIL || '',
-      password: process.env.LEGACY_PASSWORD || '',
-    });
-    const login = await fetch(`${base}/login`, {
-      method: 'POST',
-      redirect: 'manual',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-      body,
-    });
-    return { cookie: this.mergeCookies(cookie, this.readSetCookie(login)) };
+    const { createAuthenticatedLegacySession } = await import('../common/legacy-session');
+    try {
+      return await createAuthenticatedLegacySession(
+        this.legacyBaseUrl(),
+        process.env.LEGACY_EMAIL || '',
+        process.env.LEGACY_PASSWORD || '',
+        (html, name) => this.extractInputValue(html, name),
+      );
+    } catch {
+      throw new ServiceUnavailableException('Não foi possível autenticar no sistema antigo de anexos.');
+    }
   }
 
   private async downloadLegacyAttachment(downloadUrl: string): Promise<{ buffer: Buffer; contentType: string | null }> {
     const session = await this.createLegacySession();
-    const response = await fetch(this.resolveLegacyUrl(downloadUrl), { headers: { Cookie: session.cookie }, redirect: 'follow' });
+    const response = await session.fetch(this.resolveLegacyUrl(downloadUrl), { redirect: 'follow' });
     if (!response.ok) throw new NotFoundException('Arquivo não encontrado no legado');
     return {
       buffer: Buffer.from(await response.arrayBuffer()),
@@ -2570,9 +2991,7 @@ export class DemandasService {
     contentType: string,
   ): Promise<{ filename: string; storagePath: string }> {
     const session = await this.createLegacySession();
-    const base = this.legacyBaseUrl();
-    const formPage = await fetch(`${base}/painel/demandas/anexos/${legacyDemandaId}`, { headers: { Cookie: session.cookie } });
-    const formHtml = await formPage.text();
+    const formHtml = await session.get(`/painel/demandas/anexos/${legacyDemandaId}`);
     const token = this.extractInputValue(formHtml, '_token');
     if (!token) throw new ServiceUnavailableException('Não foi possível ler o formulário de anexos do legado.');
 
@@ -2584,16 +3003,15 @@ export class DemandasService {
     form.set('enviar', 'Incluir');
     const fileBytes = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
     form.set('imagem', new Blob([fileBytes], { type: contentType || 'application/octet-stream' }), originalFilename || 'arquivo');
-    const response = await fetch(`${base}/painel/demandas/anexos/cadastrar/${legacyDemandaId}`, {
+    const base = this.legacyBaseUrl();
+    const response = await session.fetch(`${base}/painel/demandas/anexos/cadastrar/${legacyDemandaId}`, {
       method: 'POST',
-      headers: { Cookie: session.cookie },
       body: form,
       redirect: 'follow',
     });
     if (!response.ok) throw new ServiceUnavailableException('Falha ao salvar anexo no legado.');
 
-    const updated = await fetch(`${base}/painel/demandas/anexos/${legacyDemandaId}`, { headers: { Cookie: session.cookie } });
-    const anexos = this.parseLegacyAnexosPage(await updated.text(), legacyDemandaId);
+    const anexos = this.parseLegacyAnexosPage(await session.get(`/painel/demandas/anexos/${legacyDemandaId}`), legacyDemandaId);
     const filename = path.basename(originalFilename || 'arquivo');
     const created = anexos.filter((item) => !beforePaths.has(item.storagePath));
     const exact = created.find((item) => item.filename.toLowerCase() === filename.toLowerCase());
@@ -2605,11 +3023,12 @@ export class DemandasService {
   }
 
   private async listLegacyAttachments(legacyDemandaId: string): Promise<Array<{ filename: string; storagePath: string }>> {
-    const session = await this.createLegacySession();
-    const base = this.legacyBaseUrl();
-    const response = await fetch(`${base}/painel/demandas/anexos/${legacyDemandaId}`, { headers: { Cookie: session.cookie } });
-    if (!response.ok) return [];
-    return this.parseLegacyAnexosPage(await response.text(), legacyDemandaId);
+    try {
+      const session = await this.createLegacySession();
+      return this.parseLegacyAnexosPage(await session.get(`/painel/demandas/anexos/${legacyDemandaId}`), legacyDemandaId);
+    } catch {
+      return [];
+    }
   }
 
   private parseLegacyAnexosPage(html: string, legacyDemandaId: string): Array<{ filename: string; storagePath: string }> {
@@ -2678,6 +3097,8 @@ export class DemandasService {
   }
 
   async exportExcel(userId: string, filters: ListDemandasFiltersDto) {
+    await this.recorrencia.reabrirDemandasVencidas();
+
     const needsPrefilter =
       !!filters.pesquisaGeral?.trim() ||
       !!filters.responsavelPrincipalId ||
@@ -3248,6 +3669,8 @@ export class DemandasService {
       }[];
     };
   }> {
+    await this.recorrencia.reabrirDemandasVencidas();
+
     const startedAt = Date.now();
     const requestScope = this.normalizeIaScope(options?.scope);
     let searchMode: PesquisaGeralMode = this.parsePesquisaGeralMode(query, requestScope);
@@ -3570,12 +3993,21 @@ Se não conseguir extrair filtros, retorne filters como {} e explique isso no ca
     avaliacaoIa?: { resumo: string; kpis: { nome: string; situacao: 'ok' | 'desconto_leve' | 'desconto_grave'; comentario: string }[] };
   }> {
     void userId;
-    let metricas = await this.loadDashboardKpisViaRpc();
+    let metricas: {
+      totalDemandas: number;
+      concluidas: number;
+      emAberto: number;
+      tempoMedioResolucaoHoras: number | null;
+      demandasSemObservacaoRecente: number;
+      tempoMedioDesdeUltimaObservacaoHoras: number | null;
+      porStatus: Record<string, number>;
+    } | null = null;
     if (!metricas) {
       const sb = this.supabase.getClient();
       const { data: rows } = await sb
         .from('Demanda')
         .select('id, status, created_at, updated_at, resolvido_em, ultima_observacao_em')
+        .gte('created_at', DASHBOARD_BASELINE_TIMESTAMP)
         .order('created_at', { ascending: false })
         .limit(5000);
       const list = rows ?? [];
@@ -3590,7 +4022,8 @@ Se não conseguir extrair filtros, retorne filters como {} e explique isso no ca
         ? temposResolucao.reduce((a, b) => a + b, 0) / temposResolucao.length
         : null;
 
-      const comUltimaObs = list.filter((r: any) => r.ultima_observacao_em);
+      const activeList = list.filter((r: any) => ['em_aberto', 'em_andamento', 'standby'].includes(String(r.status)));
+      const comUltimaObs = activeList.filter((r: any) => r.ultima_observacao_em);
       const agora = new Date().toISOString();
       const temposDesdeObs = comUltimaObs
         .map((r: any) => computeTempoHoras(r.ultima_observacao_em, agora))
@@ -3598,7 +4031,7 @@ Se não conseguir extrair filtros, retorne filters como {} e explique isso no ca
       const tempoMedioDesdeUltimaObservacaoHoras = temposDesdeObs.length
         ? temposDesdeObs.reduce((a, b) => a + b, 0) / temposDesdeObs.length
         : null;
-      const demandasSemObservacaoRecente = list.filter((r: any) => {
+      const demandasSemObservacaoRecente = activeList.filter((r: any) => {
         const ultima = r.ultima_observacao_em as string | null | undefined;
         if (ultima == null) return true;
         return (computeTempoHoras(ultima, agora) ?? 0) > 24 * 7;

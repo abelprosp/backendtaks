@@ -24,7 +24,9 @@ import { UpdateDemandaDto } from './dto/update-demanda.dto';
 import { ListDemandasFiltersDto } from './dto/list-demandas-filters.dto';
 import { CreateDemandaFromTemplateDto } from '../templates/dto/create-demanda-from-template.dto';
 import { BuscarIaDto } from './dto/buscar-ia.dto';
+import { CreateAnexoUploadUrlDto, FinalizeAnexoUploadDto } from './dto/create-anexo-upload.dto';
 import { AdminGuard } from '../auth/admin.guard';
+import { DemandaDeleteGuard } from '../auth/demanda-delete.guard';
 import { stringToBool } from './utils';
 
 @Controller('demandas')
@@ -112,7 +114,7 @@ export class DemandasController {
   }
 
   @Delete(':id')
-  @UseGuards(AdminGuard)
+  @UseGuards(DemandaDeleteGuard)
   remove(@Req() req: { user: { id: string } }, @Param('id') id: string) {
     return this.demandasService.remove(req.user.id, id);
   }
@@ -136,6 +138,15 @@ export class DemandasController {
     return this.demandasService.updateObservacao(req.user.id, id, observacaoId, body.texto);
   }
 
+  @Delete(':id/observacoes/:observacaoId')
+  deleteObservacao(
+    @Req() req: { user: { id: string } },
+    @Param('id') id: string,
+    @Param('observacaoId') observacaoId: string,
+  ) {
+    return this.demandasService.deleteObservacao(req.user.id, id, observacaoId);
+  }
+
   @Post(':id/anexos')
   @UseInterceptors(FileInterceptor('file'))
   addAnexo(
@@ -146,6 +157,24 @@ export class DemandasController {
   ) {
     if (!file) throw new BadRequestException('Envie um arquivo (campo "file")');
     return this.demandasService.addAnexo(req.user.id, id, file, body?.nome);
+  }
+
+  @Post(':id/anexos/upload-url')
+  createAnexoUploadUrl(
+    @Req() req: { user: { id: string } },
+    @Param('id') id: string,
+    @Body() dto: CreateAnexoUploadUrlDto,
+  ) {
+    return this.demandasService.createAnexoUploadUrl(req.user.id, id, dto);
+  }
+
+  @Post(':id/anexos/finalizar-upload')
+  finalizeAnexoUpload(
+    @Req() req: { user: { id: string } },
+    @Param('id') id: string,
+    @Body() dto: FinalizeAnexoUploadDto,
+  ) {
+    return this.demandasService.finalizeAnexoUpload(req.user.id, id, dto);
   }
 
   @Get(':id/anexos/:anexoId/download')

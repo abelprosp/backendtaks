@@ -157,14 +157,16 @@ model DemandaResponsavel {
 }
 
 model Subtarefa {
-  id               String   @id @default(uuid())
-  demandaId        String   @map("demanda_id")
+  id               String    @id @default(uuid())
+  demandaId        String    @map("demanda_id")
   titulo           String
-  concluida        Boolean  @default(false)
-  ordem            Int      @default(0) @map("ordem")
-  responsavelUserId String? @map("responsavel_user_id")
-  demanda          Demanda  @relation(fields: [demandaId], references: [id], onDelete: Cascade)
-  responsavel      User?    @relation("SubtarefaResponsavel", fields: [responsavelUserId], references: [id], onDelete: SetNull)
+  concluida        Boolean   @default(false)
+  ordem            Int       @default(0) @map("ordem")
+  responsavelUserId String?  @map("responsavel_user_id")
+  concluidaEm      DateTime? @map("concluida_em")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  demanda          Demanda   @relation(fields: [demandaId], references: [id], onDelete: Cascade)
+  responsavel      User?     @relation("SubtarefaResponsavel", fields: [responsavelUserId], references: [id], onDelete: SetNull)
   @@map("subtarefa")
 }
 
