@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using LuxusDemandas.Api.Configuration;
 using LuxusDemandas.Api.Models;
 using LuxusDemandas.Api.Support;
@@ -12,17 +13,20 @@ public sealed class LuxusParceirosIntegrationService
 {
     private readonly SupabaseRestService _supabase;
     private readonly DemandasService _demandas;
+    private readonly ClientesService _clientes;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly AppOptions _options;
 
     public LuxusParceirosIntegrationService(
         SupabaseRestService supabase,
         DemandasService demandas,
+        ClientesService clientes,
         IHttpClientFactory httpClientFactory,
         IOptions<AppOptions> options)
     {
         _supabase = supabase;
         _demandas = demandas;
+        _clientes = clientes;
         _httpClientFactory = httpClientFactory;
         _options = options.Value;
     }
@@ -49,6 +53,9 @@ public sealed class LuxusParceirosIntegrationService
         CancellationToken cancellationToken)
     {
         var normalized = search?.Trim();
+        var documentSearch = string.IsNullOrWhiteSpace(normalized)
+            ? null
+            : Regex.Replace(normalized, "[^0-9]", string.Empty);
         var clientes = await _supabase.ListClientesAsync(true, cancellationToken);
         return clientes
             .Where(cliente =>
@@ -57,13 +64,16 @@ public sealed class LuxusParceirosIntegrationService
                 || (!string.IsNullOrWhiteSpace(cliente.NomeFantasia)
                     && cliente.NomeFantasia.Contains(normalized, StringComparison.OrdinalIgnoreCase))
                 || (!string.IsNullOrWhiteSpace(cliente.Documento)
-                    && cliente.Documento.Contains(normalized, StringComparison.OrdinalIgnoreCase)))
+                    && (cliente.Documento.Contains(normalized, StringComparison.OrdinalIgnoreCase)
+                        || (!string.IsNullOrWhiteSpace(documentSearch)
+                            && cliente.Documento.Contains(documentSearch, StringComparison.OrdinalIgnoreCase)))))
             .Take(50)
             .Select(cliente => new LuxusParceirosClientDto(
                 cliente.Id,
                 cliente.Name,
                 cliente.Documento,
-                cliente.NomeFantasia))
+                cliente.NomeFantasia,
+                cliente.TipoPessoa))
             .ToList();
     }
 
@@ -72,10 +82,9 @@ public sealed class LuxusParceirosIntegrationService
         CancellationToken cancellationToken)
     {
         if (!Guid.TryParse(request.RequestId, out _)
-            || !Guid.TryParse(request.ResponsibleId, out _)
-            || !Guid.TryParse(request.ClientId, out _))
+            || !Guid.TryParse(request.ResponsibleId, out _))
         {
-            throw new InvalidOperationException("Solicitação, responsável ou cliente inválido.");
+            throw new InvalidOperationException("Solicitação ou responsável inválido.");
         }
         if (!DateOnly.TryParseExact(request.Deadline, "yyyy-MM-dd", out var deadline)
             || deadline < DateOnly.FromDateTime(DateTime.UtcNow))
@@ -94,11 +103,36 @@ public sealed class LuxusParceirosIntegrationService
         {
             throw new KeyNotFoundException("Responsável não encontrado ou inativo no Luxus Task.");
         }
-        var client = (await _supabase.ListClientesAsync(true, cancellationToken))
-            .FirstOrDefault(item => string.Equals(item.Id, request.ClientId, StringComparison.OrdinalIgnoreCase));
-        if (client is null)
+        ClienteDto? client;
+        if (!string.IsNullOrWhiteSpace(request.ClientId))
         {
-            throw new KeyNotFoundException("Cliente não encontrado ou inativo no Luxus Task.");
+            if (!Guid.TryParse(request.ClientId, out _))
+            {
+                throw new InvalidOperationException("Cliente inválido.");
+            }
+
+            client = (await _supabase.ListClientesAsync(true, cancellationToken))
+                .FirstOrDefault(item => string.Equals(item.Id, request.ClientId, StringComparison.OrdinalIgnoreCase));
+            if (client is null)
+            {
+                throw new KeyNotFoundException("Cliente não encontrado ou inativo no Luxus Task.");
+            }
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(request.ClientName)
+                || string.IsNullOrWhiteSpace(request.ClientDocumentType)
+                || string.IsNullOrWhiteSpace(request.ClientDocument))
+            {
+                throw new InvalidOperationException(
+                    "Selecione um cliente ou informe nome, tipo e documento para o cadastro.");
+            }
+
+            client = await _clientes.FindOrCreateForIntegrationAsync(
+                request.ClientName,
+                request.ClientDocumentType,
+                request.ClientDocument,
+                cancellationToken);
         }
 
         var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
@@ -156,6 +190,7 @@ public sealed class LuxusParceirosIntegrationService
             protocol,
             status = "em_aberto",
             responsible = new { id = responsible.Id, name = responsible.Name, email = responsible.Email },
+            client = new { id = client.Id, name = client.Name, document = client.Documento },
             updatedAt = DateTimeOffset.UtcNow,
             mappingId = mapping.GetStringOrEmpty("id"),
         };

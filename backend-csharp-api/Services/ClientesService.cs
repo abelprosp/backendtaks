@@ -20,6 +20,54 @@ public sealed class ClientesService
     public Task<IReadOnlyList<ClienteDto>> ListAsync(bool activeOnly, CancellationToken cancellationToken) =>
         _supabase.ListClientesAsync(activeOnly, cancellationToken);
 
+    public async Task<ClienteDto?> FindByDocumentAsync(
+        string? document,
+        CancellationToken cancellationToken)
+    {
+        var normalized = NormalizeDocumento(document, null);
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return null;
+        }
+
+        var existing = await _supabase.QuerySingleAsync(
+            $"Cliente?select={ClienteSelectFields}&documento=eq.{Uri.EscapeDataString(normalized)}&limit=1",
+            cancellationToken);
+        return existing is null ? null : MapCliente(existing.Value);
+    }
+
+    public async Task<ClienteDto> FindOrCreateForIntegrationAsync(
+        string name,
+        string documentType,
+        string document,
+        CancellationToken cancellationToken)
+    {
+        var tipoPessoa = NormalizeTipoPessoa(documentType);
+        var normalizedDocument = NormalizeDocumento(document, tipoPessoa);
+        var existing = await FindByDocumentAsync(normalizedDocument, cancellationToken);
+        if (existing is not null)
+        {
+            if (!existing.Active)
+            {
+                throw new InvalidOperationException(
+                    $"O documento informado pertence ao cliente inativo \"{existing.Name}\" no Luxus Task.");
+            }
+
+            return existing;
+        }
+
+        return await CreateAsync(
+            new CreateClienteRequest
+            {
+                Name = name.Trim(),
+                TipoPessoa = tipoPessoa,
+                Documento = normalizedDocument,
+                Active = true,
+                ObservacoesCadastro = "Cliente criado automaticamente pela integração com o Luxus Parceiros.",
+            },
+            cancellationToken);
+    }
+
     public async Task<ClienteDto> CreateAsync(CreateClienteRequest request, CancellationToken cancellationToken)
     {
         var tipoPessoa = NormalizeTipoPessoa(request.TipoPessoa);

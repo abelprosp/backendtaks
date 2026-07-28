@@ -10,8 +10,13 @@ public sealed class CreateLuxusParceirosDemandaRequest
     [Required]
     public string ResponsibleId { get; init; } = string.Empty;
 
-    [Required]
-    public string ClientId { get; init; } = string.Empty;
+    public string? ClientId { get; init; }
+
+    public string? ClientName { get; init; }
+
+    public string? ClientDocumentType { get; init; }
+
+    public string? ClientDocument { get; init; }
 
     [Required]
     public string Deadline { get; init; } = string.Empty;
@@ -44,4 +49,5 @@ public sealed record LuxusParceirosClientDto(
     string Id,
     string Name,
     string? Document,
-    string? TradeName);
+    string? TradeName,
+    string? PersonType);
