@@ -44,13 +44,43 @@ public sealed class LuxusParceirosIntegrationService
     public Task<IReadOnlyList<UserDropdownDto>> ListResponsaveisAsync(CancellationToken cancellationToken) =>
         _supabase.ListUsersForDropdownAsync(cancellationToken);
 
+    public async Task<IReadOnlyList<LuxusParceirosClientDto>> ListClientesAsync(
+        string? search,
+        CancellationToken cancellationToken)
+    {
+        var normalized = search?.Trim();
+        var clientes = await _supabase.ListClientesAsync(true, cancellationToken);
+        return clientes
+            .Where(cliente =>
+                string.IsNullOrWhiteSpace(normalized)
+                || cliente.Name.Contains(normalized, StringComparison.OrdinalIgnoreCase)
+                || (!string.IsNullOrWhiteSpace(cliente.NomeFantasia)
+                    && cliente.NomeFantasia.Contains(normalized, StringComparison.OrdinalIgnoreCase))
+                || (!string.IsNullOrWhiteSpace(cliente.Documento)
+                    && cliente.Documento.Contains(normalized, StringComparison.OrdinalIgnoreCase)))
+            .Take(50)
+            .Select(cliente => new LuxusParceirosClientDto(
+                cliente.Id,
+                cliente.Name,
+                cliente.Documento,
+                cliente.NomeFantasia))
+            .ToList();
+    }
+
     public async Task<object> CreateAsync(
         CreateLuxusParceirosDemandaRequest request,
         CancellationToken cancellationToken)
     {
-        if (!Guid.TryParse(request.RequestId, out _) || !Guid.TryParse(request.ResponsibleId, out _))
+        if (!Guid.TryParse(request.RequestId, out _)
+            || !Guid.TryParse(request.ResponsibleId, out _)
+            || !Guid.TryParse(request.ClientId, out _))
         {
-            throw new InvalidOperationException("Solicitação ou responsável inválido.");
+            throw new InvalidOperationException("Solicitação, responsável ou cliente inválido.");
+        }
+        if (!DateOnly.TryParseExact(request.Deadline, "yyyy-MM-dd", out var deadline)
+            || deadline < DateOnly.FromDateTime(DateTime.UtcNow))
+        {
+            throw new InvalidOperationException("Informe um prazo válido, igual ou posterior à data atual.");
         }
 
         var existing = await FindMappingByExternalIdAsync(request.RequestId, cancellationToken);
@@ -63,6 +93,12 @@ public sealed class LuxusParceirosIntegrationService
         if (responsible is null || !responsible.Active)
         {
             throw new KeyNotFoundException("Responsável não encontrado ou inativo no Luxus Task.");
+        }
+        var client = (await _supabase.ListClientesAsync(true, cancellationToken))
+            .FirstOrDefault(item => string.Equals(item.Id, request.ClientId, StringComparison.OrdinalIgnoreCase));
+        if (client is null)
+        {
+            throw new KeyNotFoundException("Cliente não encontrado ou inativo no Luxus Task.");
         }
 
         var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
@@ -81,8 +117,10 @@ public sealed class LuxusParceirosIntegrationService
             {
                 Assunto = request.Subject.Trim(),
                 Prioridade = request.Priority ?? false,
+                Prazo = deadline.ToString("yyyy-MM-dd"),
                 Status = "em_aberto",
                 ObservacoesGerais = string.Join('\n', origin.Where(line => line is not null)),
+                ClienteIds = [client.Id],
                 Responsaveis =
                 [
                     new DemandaResponsavelInput
