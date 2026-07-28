@@ -12,10 +12,14 @@ namespace LuxusDemandas.Api.Controllers;
 public sealed class DemandasController : ControllerBase
 {
     private readonly DemandasService _demandas;
+    private readonly LuxusParceirosIntegrationService _luxusParceiros;
 
-    public DemandasController(DemandasService demandas)
+    public DemandasController(
+        DemandasService demandas,
+        LuxusParceirosIntegrationService luxusParceiros)
     {
         _demandas = demandas;
+        _luxusParceiros = luxusParceiros;
     }
 
     [HttpPost]
@@ -103,7 +107,9 @@ public sealed class DemandasController : ControllerBase
     {
         try
         {
-            return Ok(await _demandas.UpdateAsync(User.GetUserId(), id, request, cancellationToken));
+            var updated = await _demandas.UpdateAsync(User.GetUserId(), id, request, cancellationToken);
+            await _luxusParceiros.NotifyIfIntegratedAsync(id, updated, cancellationToken);
+            return Ok(updated);
         }
         catch (KeyNotFoundException ex)
         {
@@ -146,7 +152,9 @@ public sealed class DemandasController : ControllerBase
     {
         try
         {
-            return Ok(await _demandas.AddObservacaoAsync(User.GetUserId(), id, request.Texto, cancellationToken));
+            var updated = await _demandas.AddObservacaoAsync(User.GetUserId(), id, request.Texto, cancellationToken);
+            await _luxusParceiros.NotifyIfIntegratedAsync(id, updated, cancellationToken);
+            return Ok(updated);
         }
         catch (KeyNotFoundException ex)
         {

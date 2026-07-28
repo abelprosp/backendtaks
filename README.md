@@ -64,6 +64,9 @@ Principais:
 - `REFRESH_EXPIRES_IN`
 - `SUPABASE_STORAGE_BUCKET`
 - `OPENAI_API_KEY` (opcional)
+- `LUXUS_PARCEIROS_INTEGRATION_KEY` para aceitar demandas do Parceiros
+- `LUXUS_PARCEIROS_CALLBACK_URL` para devolver status e resolução
+- `LUXUS_PARCEIROS_TECHNICAL_USER_EMAIL` para o criador automático
 
 Opcional/legado:
 
@@ -85,3 +88,23 @@ Guia detalhado em `DEPLOY.md`.
 - a API C# em `backend-csharp-api/` cobre auth, users, setores, clientes, templates, demandas, observacoes, anexos, dashboard e busca por IA
 - o Dockerfile da raiz foi ajustado para publicar a API C# como backend principal
 - o backend NestJS legado continua versionado apenas para consulta tecnica e rollback controlado
+
+## Integração Luxus Parceiros
+
+A integração adiciona endpoints servidor-a-servidor sem alterar o frontend nem
+o fluxo normal do Luxus Task. Demandas internas continuam sendo criadas
+normalmente. Demandas externas aparecem com o criador automático
+`LUXUSPARCEIROS` e com o responsável selecionado no sistema Parceiros.
+
+Antes do deploy, aplique no Supabase:
+
+`supabase/migrations/20260728_luxus_parceiros_integration.sql`
+
+Endpoints protegidos pelo header `x-integration-key`:
+
+- `GET /integrations/luxus-parceiros/responsaveis`
+- `POST /integrations/luxus-parceiros/demandas`
+- `GET /integrations/luxus-parceiros/demandas/{externalRequestId}`
+
+Atualizações e conclusão enviam callback assinado ao Luxus Parceiros. Falhas no
+callback não bloqueiam o trabalho nem a conclusão dentro do Task.

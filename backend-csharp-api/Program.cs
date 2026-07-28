@@ -38,6 +38,9 @@ builder.Services.Configure<AppOptions>(options =>
     options.SmtpFromName = builder.Configuration["SMTP_FROM_NAME"] ?? "Luxus Demandas";
     options.SmtpUseSsl = !bool.TryParse(builder.Configuration["SMTP_USE_SSL"], out var smtpUseSsl) || smtpUseSsl;
     options.NodeEnv = builder.Configuration["NODE_ENV"] ?? "development";
+    options.LuxusParceirosIntegrationKey = builder.Configuration["LUXUS_PARCEIROS_INTEGRATION_KEY"] ?? string.Empty;
+    options.LuxusParceirosCallbackUrl = builder.Configuration["LUXUS_PARCEIROS_CALLBACK_URL"] ?? string.Empty;
+    options.LuxusParceirosTechnicalUserEmail = builder.Configuration["LUXUS_PARCEIROS_TECHNICAL_USER_EMAIL"] ?? "luxusparceiros@integration.local";
 });
 
 builder.Services.AddHttpClient();
@@ -52,6 +55,7 @@ builder.Services.AddScoped<TemplatesService>();
 builder.Services.AddScoped<DemandaVisibilityService>();
 builder.Services.AddSingleton<LegacyAttachmentService>();
 builder.Services.AddScoped<DemandasService>();
+builder.Services.AddScoped<LuxusParceirosIntegrationService>();
 builder.Services.AddScoped<MessageReviewService>();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();

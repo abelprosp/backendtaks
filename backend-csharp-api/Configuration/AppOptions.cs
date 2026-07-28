@@ -29,4 +29,7 @@ public sealed class AppOptions
     public string SmtpFromName { get; set; } = "Luxus Demandas";
     public bool SmtpUseSsl { get; set; } = true;
     public string NodeEnv { get; set; } = "development";
+    public string LuxusParceirosIntegrationKey { get; set; } = string.Empty;
+    public string LuxusParceirosCallbackUrl { get; set; } = string.Empty;
+    public string LuxusParceirosTechnicalUserEmail { get; set; } = "luxusparceiros@integration.local";
 }

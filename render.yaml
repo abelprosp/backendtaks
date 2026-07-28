@@ -43,3 +43,9 @@ services:
         sync: false
       - key: OPENAI_MODEL
         value: gpt-4.1-mini
+      - key: LUXUS_PARCEIROS_INTEGRATION_KEY
+        sync: false
+      - key: LUXUS_PARCEIROS_CALLBACK_URL
+        sync: false
+      - key: LUXUS_PARCEIROS_TECHNICAL_USER_EMAIL
+        value: luxusparceiros@integration.local
