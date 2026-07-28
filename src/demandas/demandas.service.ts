@@ -2966,7 +2966,10 @@ export class DemandasService {
         this.legacyBaseUrl(),
         process.env.LEGACY_EMAIL || '',
         process.env.LEGACY_PASSWORD || '',
-        (html, name) => this.extractInputValue(html, name),
+        {
+          extractInputValue: (html: string, name: string) =>
+            this.extractInputValue(html, name),
+        },
       );
     } catch {
       throw new ServiceUnavailableException('Não foi possível autenticar no sistema antigo de anexos.');
