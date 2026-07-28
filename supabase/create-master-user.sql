@@ -1,5 +1,5 @@
 -- ============================================================
--- Luxus Tasks - Criar usuário master
+-- LUXUS DEMANDAS - Criar usuário master
 -- Execute no SQL Editor do Supabase (após schema.sql e seed.sql).
 -- Login: redobrai@gmail.com / Amocarro4587@
 -- ============================================================

@@ -1,40 +1,26 @@
+import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
+import { configureApp } from './app.factory';
+import { APP_NAME, getNodeEnv, getPort } from './common/runtime-config';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      transform: true,
-      transformOptions: { enableImplicitConversion: true },
-    }),
-  );
-  const allowedOrigins = (process.env.FRONTEND_ORIGIN || 'http://localhost:3000')
-    .split(',')
-    .map((o) => o.trim().replace(/\/$/, ''))
-    .filter(Boolean);
-  const allowOrigin = (origin: string | undefined): string | false => {
-    if (!origin) return false;
-    const normalized = origin.replace(/\/$/, '');
-    if (allowedOrigins.includes(normalized)) return origin;
-    if (allowedOrigins.some((o) => normalized === o.replace(/\/$/, ''))) return origin;
-    if (normalized.includes('luxustasks') && normalized.endsWith('vercel.app')) return origin;
-    return false;
-  };
-  app.enableCors({
-    origin: (origin, cb) => {
-      const allowed = allowOrigin(origin);
-      if (allowed) return cb(null, allowed);
-      cb(null, false);
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-  });
-  const port = process.env.PORT || 4000;
-  await app.listen(port);
-  console.log(`Luxus Tasks API rodando em http://localhost:${port}`);
+  const logger = new Logger('Bootstrap');
+  const app = await NestFactory.create(AppModule, { bufferLogs: true, bodyParser: false });
+  const { allowedOrigins } = await configureApp(app);
+
+  const port = getPort();
+  await app.listen(port, '0.0.0.0');
+
+  logger.log(`${APP_NAME} iniciada na porta ${port} (${getNodeEnv()})`);
+  logger.log(`CORS habilitado para: ${allowedOrigins.join(', ')}`);
 }
-bootstrap();
+
+bootstrap().catch((error: unknown) => {
+  const logger = new Logger('Bootstrap');
+  logger.error(
+    'Falha ao iniciar a API',
+    error instanceof Error ? error.stack : String(error),
+  );
+  process.exit(1);
+});

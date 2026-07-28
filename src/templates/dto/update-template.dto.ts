@@ -4,6 +4,7 @@ import {
   IsOptional,
   IsArray,
   IsUUID,
+  IsDateString,
   IsEnum,
   IsInt,
   MinLength,
@@ -41,6 +42,10 @@ export class UpdateTemplateDto {
   recorrenciaTipo?: 'diaria' | 'semanal' | 'quinzenal' | 'mensal';
 
   @IsOptional()
+  @IsDateString()
+  recorrenciaDataBaseDefault?: string;
+
+  @IsOptional()
   @IsInt()
   @Min(0)
   recorrenciaPrazoReaberturaDias?: number;
@@ -52,9 +57,14 @@ export class UpdateTemplateDto {
 
   @IsOptional()
   @IsArray()
+  @IsUUID('4', { each: true })
+  clienteIds?: string[];
+
+  @IsOptional()
+  @IsArray()
   responsaveis?: { userId: string; isPrincipal?: boolean }[];
 
   @IsOptional()
   @IsArray()
-  subtarefas?: { titulo: string; ordem?: number }[];
+  subtarefas?: { titulo: string; ordem?: number; responsavelUserId?: string }[];
 }

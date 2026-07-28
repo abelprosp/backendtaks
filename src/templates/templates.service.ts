@@ -1,9 +1,32 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CreateTemplateDto } from './dto/create-template.dto';
 import { UpdateTemplateDto } from './dto/update-template.dto';
+import { normalizeDemandaMultilineText } from '../common/normalize-demanda-text';
 
-function mapTemplate(row: any, criador?: any, setores?: any[], responsaveis?: any[], subtarefas?: any[]) {
+function mapSetorRelation(item: any) {
+  const setor = item?.setor ?? item;
+  if (!setor?.id) return null;
+  return { setor: { id: setor.id, name: setor.name, slug: setor.slug } };
+}
+
+function mapClienteRelation(item: any) {
+  const cliente = item?.cliente ?? item;
+  if (!cliente?.id) return null;
+  return {
+    cliente: {
+      id: cliente.id,
+      name: cliente.name,
+      active: cliente.active,
+      tipoPessoa: cliente.tipoPessoa ?? cliente.tipo_pessoa ?? null,
+      documento: cliente.documento ?? null,
+      nomeFantasia: cliente.nomeFantasia ?? cliente.nome_fantasia ?? null,
+      legacyId: cliente.legacyId ?? cliente.legacy_id ?? null,
+    },
+  };
+}
+
+function mapTemplate(row: any, criador?: any, setores?: any[], clientes?: any[], responsaveis?: any[], subtarefas?: any[]) {
   if (!row) return null;
   return {
     id: row.id,
@@ -14,12 +37,14 @@ function mapTemplate(row: any, criador?: any, setores?: any[], responsaveis?: an
     observacoesGeraisTemplate: row.observacoes_gerais_template,
     isRecorrenteDefault: row.is_recorrente_default,
     recorrenciaTipo: row.recorrencia_tipo,
+    recorrenciaDataBaseDefault: row.recorrencia_data_base_default,
     recorrenciaPrazoReaberturaDias: row.recorrencia_prazo_reabertura_dias,
     criadorId: row.criador_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     criador: criador ? { id: criador.id, name: criador.name, email: criador.email } : undefined,
-    setores: setores?.map((s) => ({ setor: { id: s.id, name: s.name, slug: s.slug } })) ?? [],
+    setores: setores?.map(mapSetorRelation).filter(Boolean) ?? [],
+    clientes: clientes?.map(mapClienteRelation).filter(Boolean) ?? [],
     responsaveis: responsaveis ?? [],
     subtarefas: subtarefas?.sort((a, b) => (a.ordem ?? 0) - (b.ordem ?? 0)) ?? [],
   };
@@ -29,9 +54,47 @@ function mapTemplate(row: any, criador?: any, setores?: any[], responsaveis?: an
 export class TemplatesService {
   constructor(private supabase: SupabaseService) {}
 
+  private parseRpcJsonArray(value: unknown): any[] {
+    if (typeof value === 'string') {
+      try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return Array.isArray(value) ? value : [];
+  }
+
+  private mapTemplateRpcRow(row: any) {
+    if (!row) return null;
+    return mapTemplate(
+      row,
+      row?.criador ?? undefined,
+      this.parseRpcJsonArray(row?.setores),
+      this.parseRpcJsonArray(row?.clientes),
+      this.parseRpcJsonArray(row?.responsaveis),
+      this.parseRpcJsonArray(row?.subtarefas),
+    );
+  }
+
+  private validateTemplateRecorrencia(input: {
+    isRecorrenteDefault?: boolean;
+    recorrenciaTipo?: string | null;
+    recorrenciaDataBaseDefault?: string | null;
+  }) {
+    if (!input.isRecorrenteDefault) return;
+    if (!input.recorrenciaTipo) {
+      throw new BadRequestException('Informe o tipo da recorrência padrão do template.');
+    }
+    if (!input.recorrenciaDataBaseDefault) {
+      throw new BadRequestException('Informe a data base da recorrência padrão do template.');
+    }
+  }
+
   private async loadTemplateRelations(templateId: string) {
     const sb = this.supabase.getClient();
-    const [criadorRes, setorRes, respRes, subRes] = await Promise.all([
+    const [criadorRes, setorRes, clienteRes, respRes, subRes] = await Promise.all([
       sb.from('Template').select('criador_id').eq('id', templateId).single().then(async (r) => {
         if (!r.data?.criador_id) return null;
         const u = await sb.from('User').select('id, name, email').eq('id', r.data.criador_id).single();
@@ -43,6 +106,12 @@ export class TemplatesService {
         const s = await sb.from('Setor').select('id, name, slug').in('id', ids);
         return s.data ?? [];
       }),
+      sb.from('template_cliente').select('cliente_id').eq('template_id', templateId).then(async (r) => {
+        const ids = (r.data ?? []).map((x: any) => x.cliente_id);
+        if (!ids.length) return [];
+        const c = await sb.from('Cliente').select('id, name, active, tipo_pessoa, documento, nome_fantasia, legacy_id').in('id', ids);
+        return c.data ?? [];
+      }),
       sb.from('template_responsavel').select('user_id, is_principal').eq('template_id', templateId).then(async (r) => {
         const list = r.data ?? [];
         if (!list.length) return [];
@@ -51,18 +120,51 @@ export class TemplatesService {
         const userMap = new Map((u.data ?? []).map((x: any) => [x.id, x]));
         return list.map((p: any) => ({ userId: p.user_id, isPrincipal: p.is_principal, user: userMap.get(p.user_id) }));
       }),
-      sb.from('template_subtarefa').select('*').eq('template_id', templateId),
+      sb.from('template_subtarefa').select('id, template_id, titulo, ordem, responsavel_user_id').eq('template_id', templateId).order('ordem', { ascending: true }),
     ]);
+    const subtarefasRaw = subRes.data ?? [];
+    const subtarefaRespIds = [...new Set(subtarefasRaw.map((x: any) => x?.responsavel_user_id).filter(Boolean))];
+    const subtarefaUsers = subtarefaRespIds.length
+      ? await sb.from('User').select('id, name, email').in('id', subtarefaRespIds)
+      : { data: [] as any[] };
+    const subtarefaUserMap = new Map((subtarefaUsers.data ?? []).map((x: any) => [x.id, x]));
     return {
       criador: criadorRes,
       setores: setorRes,
+      clientes: clienteRes,
       responsaveis: respRes,
-      subtarefas: subRes.data ?? [],
+      subtarefas: subtarefasRaw.map((s: any) => ({
+        id: s?.id,
+        titulo: s?.titulo ?? '',
+        ordem: s?.ordem ?? 0,
+        responsavelUserId: s?.responsavel_user_id ?? null,
+        responsavel: s?.responsavel_user_id ? subtarefaUserMap.get(s.responsavel_user_id) ?? null : null,
+      })),
     };
+  }
+
+  private async findAllViaRpc(): Promise<any[] | null> {
+    const { data, error } = await this.supabase.getClient().rpc('rpc_templates_list');
+    if (error || !Array.isArray(data)) return null;
+    return data.map((row: any) => this.mapTemplateRpcRow(row)).filter(Boolean);
+  }
+
+  private async findOneViaRpc(id: string): Promise<any | undefined | null> {
+    const { data, error } = await this.supabase.getClient().rpc('rpc_template_detail', {
+      p_template_id: id,
+    });
+    if (error || !Array.isArray(data)) return null;
+    if (!data.length) return undefined;
+    return this.mapTemplateRpcRow(data[0]);
   }
 
   async create(userId: string, dto: CreateTemplateDto) {
     const sb = this.supabase.getClient();
+    this.validateTemplateRecorrencia({
+      isRecorrenteDefault: dto.isRecorrenteDefault ?? false,
+      recorrenciaTipo: dto.recorrenciaTipo ?? null,
+      recorrenciaDataBaseDefault: dto.recorrenciaDataBaseDefault ?? null,
+    });
     const { data: row, error } = await sb
       .from('Template')
       .insert({
@@ -70,9 +172,13 @@ export class TemplatesService {
         descricao: dto.descricao,
         assunto_template: dto.assuntoTemplate,
         prioridade_default: dto.prioridadeDefault ?? false,
-        observacoes_gerais_template: dto.observacoesGeraisTemplate,
+        observacoes_gerais_template:
+          dto.observacoesGeraisTemplate == null || dto.observacoesGeraisTemplate === undefined
+            ? null
+            : normalizeDemandaMultilineText(String(dto.observacoesGeraisTemplate)).trim() || null,
         is_recorrente_default: dto.isRecorrenteDefault ?? false,
         recorrencia_tipo: dto.recorrenciaTipo ?? null,
+        recorrencia_data_base_default: dto.isRecorrenteDefault ? dto.recorrenciaDataBaseDefault ?? null : null,
         recorrencia_prazo_reabertura_dias: dto.recorrenciaPrazoReaberturaDias ?? null,
         criador_id: userId,
       })
@@ -80,47 +186,95 @@ export class TemplatesService {
       .single();
     if (error) throw new Error(error.message);
     if (dto.setorIds?.length) await sb.from('template_setor').insert(dto.setorIds.map((setorId) => ({ template_id: row.id, setor_id: setorId })));
+    if (dto.clienteIds?.length) {
+      const clienteIds = [...new Set(dto.clienteIds)];
+      await sb.from('template_cliente').insert(clienteIds.map((clienteId) => ({ template_id: row.id, cliente_id: clienteId })));
+    }
     if (dto.responsaveis?.length) await sb.from('template_responsavel').insert(dto.responsaveis.map((r) => ({ template_id: row.id, user_id: r.userId, is_principal: r.isPrincipal ?? false })));
-    if (dto.subtarefas?.length) await sb.from('template_subtarefa').insert(dto.subtarefas.map((t, i) => ({ template_id: row.id, titulo: t.titulo, ordem: t.ordem ?? i })));
-    const rel = await this.loadTemplateRelations(row.id);
-    return mapTemplate(row, rel.criador, rel.setores, rel.responsaveis, rel.subtarefas);
+    if (dto.subtarefas?.length) {
+      await sb.from('template_subtarefa').insert(
+        dto.subtarefas.map((t, i) => ({
+          template_id: row.id,
+          titulo: normalizeDemandaMultilineText(String((t as any).titulo ?? '')),
+          ordem: t.ordem ?? i,
+          responsavel_user_id: t.responsavelUserId ?? null,
+        })),
+      );
+    }
+    return this.findOne(row.id);
   }
 
   async findAll() {
+    const rpcRows = await this.findAllViaRpc();
+    if (rpcRows) return rpcRows;
+
     const sb = this.supabase.getClient();
     const { data: rows } = await sb.from('Template').select('*').order('updated_at', { ascending: false });
     const result = [];
     for (const row of rows ?? []) {
       const rel = await this.loadTemplateRelations(row.id);
-      result.push(mapTemplate(row, rel.criador, rel.setores, rel.responsaveis, rel.subtarefas));
+      result.push(mapTemplate(row, rel.criador, rel.setores, rel.clientes, rel.responsaveis, rel.subtarefas));
     }
     return result;
   }
 
   async findOne(id: string) {
+    const rpcRow = await this.findOneViaRpc(id);
+    if (rpcRow !== null) {
+      if (!rpcRow) throw new NotFoundException('Template não encontrado');
+      return rpcRow;
+    }
+
     const sb = this.supabase.getClient();
     const { data: row } = await sb.from('Template').select('*').eq('id', id).single();
     if (!row) throw new NotFoundException('Template não encontrado');
     const rel = await this.loadTemplateRelations(id);
-    return mapTemplate(row, rel.criador, rel.setores, rel.responsaveis, rel.subtarefas);
+    return mapTemplate(row, rel.criador, rel.setores, rel.clientes, rel.responsaveis, rel.subtarefas);
   }
 
   async update(userId: string, id: string, dto: UpdateTemplateDto) {
-    await this.findOne(id);
+    const current = await this.findOne(id) as any;
+    this.validateTemplateRecorrencia({
+      isRecorrenteDefault: dto.isRecorrenteDefault ?? current.isRecorrenteDefault ?? false,
+      recorrenciaTipo: dto.recorrenciaTipo !== undefined ? dto.recorrenciaTipo : current.recorrenciaTipo ?? null,
+      recorrenciaDataBaseDefault:
+        dto.recorrenciaDataBaseDefault !== undefined
+          ? dto.recorrenciaDataBaseDefault
+          : current.recorrenciaDataBaseDefault ?? null,
+    });
     const sb = this.supabase.getClient();
     const upd: any = {};
     if (dto.name != null) upd.name = dto.name;
     if (dto.descricao !== undefined) upd.descricao = dto.descricao;
     if (dto.assuntoTemplate !== undefined) upd.assunto_template = dto.assuntoTemplate;
     if (dto.prioridadeDefault !== undefined) upd.prioridade_default = dto.prioridadeDefault;
-    if (dto.observacoesGeraisTemplate !== undefined) upd.observacoes_gerais_template = dto.observacoesGeraisTemplate;
+    if (dto.observacoesGeraisTemplate !== undefined) {
+      upd.observacoes_gerais_template =
+        dto.observacoesGeraisTemplate == null
+          ? null
+          : normalizeDemandaMultilineText(String(dto.observacoesGeraisTemplate)).trim() || null;
+    }
     if (dto.isRecorrenteDefault !== undefined) upd.is_recorrente_default = dto.isRecorrenteDefault;
-    if (dto.recorrenciaTipo !== undefined) upd.recorrencia_tipo = dto.recorrenciaTipo;
-    if (dto.recorrenciaPrazoReaberturaDias !== undefined) upd.recorrencia_prazo_reabertura_dias = dto.recorrenciaPrazoReaberturaDias;
+    if (dto.isRecorrenteDefault === false) {
+      upd.recorrencia_tipo = null;
+      upd.recorrencia_data_base_default = null;
+      upd.recorrencia_prazo_reabertura_dias = null;
+    } else {
+      if (dto.recorrenciaTipo !== undefined) upd.recorrencia_tipo = dto.recorrenciaTipo;
+      if (dto.recorrenciaDataBaseDefault !== undefined) upd.recorrencia_data_base_default = dto.recorrenciaDataBaseDefault;
+      if (dto.recorrenciaPrazoReaberturaDias !== undefined) upd.recorrencia_prazo_reabertura_dias = dto.recorrenciaPrazoReaberturaDias;
+    }
     if (Object.keys(upd).length) await sb.from('Template').update(upd).eq('id', id);
     if (dto.setorIds) {
       await sb.from('template_setor').delete().eq('template_id', id);
       if (dto.setorIds.length) await sb.from('template_setor').insert(dto.setorIds.map((setorId) => ({ template_id: id, setor_id: setorId })));
+    }
+    if (dto.clienteIds) {
+      await sb.from('template_cliente').delete().eq('template_id', id);
+      if (dto.clienteIds.length) {
+        const clienteIds = [...new Set(dto.clienteIds)];
+        await sb.from('template_cliente').insert(clienteIds.map((clienteId) => ({ template_id: id, cliente_id: clienteId })));
+      }
     }
     if (dto.responsaveis) {
       await sb.from('template_responsavel').delete().eq('template_id', id);
@@ -128,7 +282,16 @@ export class TemplatesService {
     }
     if (dto.subtarefas) {
       await sb.from('template_subtarefa').delete().eq('template_id', id);
-      if (dto.subtarefas.length) await sb.from('template_subtarefa').insert(dto.subtarefas.map((t, i) => ({ template_id: id, titulo: t.titulo, ordem: t.ordem ?? i })));
+      if (dto.subtarefas.length) {
+        await sb.from('template_subtarefa').insert(
+          dto.subtarefas.map((t, i) => ({
+            template_id: id,
+            titulo: normalizeDemandaMultilineText(String((t as any).titulo ?? '')),
+            ordem: t.ordem ?? i,
+            responsavel_user_id: t.responsavelUserId ?? null,
+          })),
+        );
+      }
     }
     return this.findOne(id);
   }

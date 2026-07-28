@@ -6,6 +6,7 @@ import {
   Get,
   Post,
   Put,
+  Patch,
   Param,
   Query,
   UseGuards,
@@ -23,7 +24,9 @@ import { UpdateDemandaDto } from './dto/update-demanda.dto';
 import { ListDemandasFiltersDto } from './dto/list-demandas-filters.dto';
 import { CreateDemandaFromTemplateDto } from '../templates/dto/create-demanda-from-template.dto';
 import { BuscarIaDto } from './dto/buscar-ia.dto';
+import { CreateAnexoUploadUrlDto, FinalizeAnexoUploadDto } from './dto/create-anexo-upload.dto';
 import { AdminGuard } from '../auth/admin.guard';
+import { DemandaDeleteGuard } from '../auth/demanda-delete.guard';
 import { stringToBool } from './utils';
 
 @Controller('demandas')
@@ -50,7 +53,10 @@ export class DemandasController {
     @Req() req: { user: { id: string } },
     @Body() dto: BuscarIaDto,
   ) {
-    return this.demandasService.buscarIa(req.user.id, dto.query);
+    return this.demandasService.buscarIa(req.user.id, dto.query, {
+      scope: dto.scope,
+      context: dto.context,
+    });
   }
 
   @Get('dashboard-kpis')
@@ -64,7 +70,13 @@ export class DemandasController {
     @Req() req: { user: { id: string } },
     @Query() query: ListDemandasFiltersDto,
   ) {
-    const filters = { ...query, prioridade: stringToBool(query.prioridade) } as ListDemandasFiltersDto;
+    const filters = {
+      ...query,
+      prioridade: stringToBool(query.prioridade),
+      ocultarStandby: stringToBool(query.ocultarStandby),
+      ocultarConcluidas: stringToBool(query.ocultarConcluidas),
+      responsavelApenasPrincipal: stringToBool(query.responsavelApenasPrincipal),
+    } as ListDemandasFiltersDto;
     return this.demandasService.list(req.user.id, filters);
   }
 
@@ -74,7 +86,13 @@ export class DemandasController {
     @Res() res: Response,
     @Query() query: ListDemandasFiltersDto,
   ) {
-    const filters = { ...query, prioridade: stringToBool(query.prioridade) } as ListDemandasFiltersDto;
+    const filters = {
+      ...query,
+      prioridade: stringToBool(query.prioridade),
+      ocultarStandby: stringToBool(query.ocultarStandby),
+      ocultarConcluidas: stringToBool(query.ocultarConcluidas),
+      responsavelApenasPrincipal: stringToBool(query.responsavelApenasPrincipal),
+    } as ListDemandasFiltersDto;
     const data = await this.demandasService.exportExcel(req.user.id, filters);
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Content-Disposition', 'attachment; filename=demandas.json');
@@ -96,7 +114,7 @@ export class DemandasController {
   }
 
   @Delete(':id')
-  @UseGuards(AdminGuard)
+  @UseGuards(DemandaDeleteGuard)
   remove(@Req() req: { user: { id: string } }, @Param('id') id: string) {
     return this.demandasService.remove(req.user.id, id);
   }
@@ -110,15 +128,53 @@ export class DemandasController {
     return this.demandasService.addObservacao(req.user.id, id, body.texto);
   }
 
+  @Patch(':id/observacoes/:observacaoId')
+  updateObservacao(
+    @Req() req: { user: { id: string } },
+    @Param('id') id: string,
+    @Param('observacaoId') observacaoId: string,
+    @Body() body: { texto: string },
+  ) {
+    return this.demandasService.updateObservacao(req.user.id, id, observacaoId, body.texto);
+  }
+
+  @Delete(':id/observacoes/:observacaoId')
+  deleteObservacao(
+    @Req() req: { user: { id: string } },
+    @Param('id') id: string,
+    @Param('observacaoId') observacaoId: string,
+  ) {
+    return this.demandasService.deleteObservacao(req.user.id, id, observacaoId);
+  }
+
   @Post(':id/anexos')
   @UseInterceptors(FileInterceptor('file'))
   addAnexo(
     @Req() req: { user: { id: string } },
     @Param('id') id: string,
     @UploadedFile() file: Express.Multer.File,
+    @Body() body: { nome?: string },
   ) {
     if (!file) throw new BadRequestException('Envie um arquivo (campo "file")');
-    return this.demandasService.addAnexo(req.user.id, id, file);
+    return this.demandasService.addAnexo(req.user.id, id, file, body?.nome);
+  }
+
+  @Post(':id/anexos/upload-url')
+  createAnexoUploadUrl(
+    @Req() req: { user: { id: string } },
+    @Param('id') id: string,
+    @Body() dto: CreateAnexoUploadUrlDto,
+  ) {
+    return this.demandasService.createAnexoUploadUrl(req.user.id, id, dto);
+  }
+
+  @Post(':id/anexos/finalizar-upload')
+  finalizeAnexoUpload(
+    @Req() req: { user: { id: string } },
+    @Param('id') id: string,
+    @Body() dto: FinalizeAnexoUploadDto,
+  ) {
+    return this.demandasService.finalizeAnexoUpload(req.user.id, id, dto);
   }
 
   @Get(':id/anexos/:anexoId/download')
@@ -128,9 +184,19 @@ export class DemandasController {
     @Param('anexoId') anexoId: string,
     @Res() res: Response,
   ) {
-    const { path: filePath, filename, mimeType } = await this.demandasService.getAnexoForDownload(req.user.id, id, anexoId);
-    res.setHeader('Content-Type', mimeType);
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
-    return res.sendFile(filePath);
+    const download = await this.demandasService.getAnexoForDownload(req.user.id, id, anexoId);
+    res.setHeader('Content-Type', download.mimeType);
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(download.filename)}"`);
+    if ('buffer' in download) return res.send(download.buffer);
+    return res.sendFile(download.path);
+  }
+
+  @Delete(':id/anexos/:anexoId')
+  deleteAnexo(
+    @Req() req: { user: { id: string } },
+    @Param('id') id: string,
+    @Param('anexoId') anexoId: string,
+  ) {
+    return this.demandasService.deleteAnexo(req.user.id, id, anexoId);
   }
 }

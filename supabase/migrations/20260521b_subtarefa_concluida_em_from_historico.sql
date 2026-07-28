@@ -1,0 +1,12 @@
+-- Após 20260521_subtarefa_completion_tracking.sql:
+-- Os horários reais vêm do histórico (demanda_evento, tipo subtarefas_alteradas).
+-- Rode no app: POST /api/cron/backfill-subtarefa-concluida-em com { "apply": true }
+-- ou abra o dashboard KPIs com ?sync_historico=true (admin).
+
+-- Opcional: limpar estimativas (updated_at) para o backfill gravar só horários do histórico.
+-- UPDATE public.subtarefa s
+-- SET concluida_em = NULL
+-- FROM public."Demanda" d
+-- WHERE s.demanda_id = d.id
+--   AND s.concluida = true
+--   AND d.created_at >= '2026-04-01';
