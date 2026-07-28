@@ -11,6 +11,12 @@ public sealed class CreateLuxusParceirosDemandaRequest
     public string ResponsibleId { get; init; } = string.Empty;
 
     [Required]
+    public string ClientId { get; init; } = string.Empty;
+
+    [Required]
+    public string Deadline { get; init; } = string.Empty;
+
+    [Required]
     public string Subject { get; init; } = string.Empty;
 
     [Required]
@@ -33,3 +39,9 @@ public sealed class CreateLuxusParceirosDemandaRequest
 
     public bool? Priority { get; init; }
 }
+
+public sealed record LuxusParceirosClientDto(
+    string Id,
+    string Name,
+    string? Document,
+    string? TradeName);

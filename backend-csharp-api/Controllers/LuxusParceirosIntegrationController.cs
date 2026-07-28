@@ -27,6 +27,18 @@ public sealed class LuxusParceirosIntegrationController : ControllerBase
         return Ok(await _integration.ListResponsaveisAsync(cancellationToken));
     }
 
+    [HttpGet("clientes")]
+    public async Task<IActionResult> Clientes(
+        [FromQuery] string? search = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_integration.IsAuthorized(Request.Headers["x-integration-key"]))
+        {
+            return Unauthorized(new { message = "Integração não autorizada" });
+        }
+        return Ok(await _integration.ListClientesAsync(search, cancellationToken));
+    }
+
     [HttpPost("demandas")]
     public async Task<IActionResult> Create(
         [FromBody] CreateLuxusParceirosDemandaRequest request,
