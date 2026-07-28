@@ -14,9 +14,10 @@ WORKDIR /app
 
 COPY --from=build /app/publish ./
 
-ENV ASPNETCORE_URLS=http://0.0.0.0:10000
-ENV PORT=10000
+ENV ASPNETCORE_HTTP_PORTS=8080
 
-EXPOSE 10000
+EXPOSE 8080
 
-ENTRYPOINT ["dotnet", "LuxusDemandas.Api.dll"]
+# Railway and Render inject PORT at runtime. The fallback keeps local Docker
+# execution predictable when no platform-specific port was provided.
+ENTRYPOINT ["sh", "-c", "exec dotnet LuxusDemandas.Api.dll --urls http://0.0.0.0:${PORT:-8080}"]
