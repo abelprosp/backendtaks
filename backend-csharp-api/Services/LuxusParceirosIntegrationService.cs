@@ -203,6 +203,22 @@ public sealed class LuxusParceirosIntegrationService
         return await BuildResponseAsync(mapping, cancellationToken);
     }
 
+    public async Task<object> AddCommentAsync(
+        string externalRequestId,
+        AddLuxusParceirosCommentRequest request,
+        CancellationToken cancellationToken)
+    {
+        var mapping = await FindMappingByExternalIdAsync(externalRequestId, cancellationToken)
+                      ?? throw new KeyNotFoundException("Demanda integrada não encontrada.");
+        var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
+        var text = $"Luxus Parceiros — {request.AuthorName.Trim()}: {request.Content.Trim()}";
+        return await _demandas.AddObservacaoAsync(
+            technicalUserId,
+            mapping.GetStringOrEmpty("demanda_id"),
+            text,
+            cancellationToken);
+    }
+
     public async Task NotifyIfIntegratedAsync(
         string demandaId,
         object currentDemand,
@@ -281,6 +297,11 @@ public sealed class LuxusParceirosIntegrationService
             .Select(item => ReadString(item, "texto"))
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .ToArray();
+        var taskResponses = observations
+            .Where(value => !value.StartsWith(
+                "Luxus Parceiros —",
+                StringComparison.OrdinalIgnoreCase))
+            .ToArray();
         var responsibles = ReadArray(root, "responsaveis");
         var principal = responsibles.FirstOrDefault(item =>
             ReadBoolean(item, "isPrincipal") || ReadBoolean(item, "is_principal"));
@@ -290,8 +311,8 @@ public sealed class LuxusParceirosIntegrationService
         }
         var user = ReadObject(principal, "user");
         var taskStatus = ReadString(root, "status");
-        var resolution = observations.Length > 0
-            ? observations[^1]
+        var resolution = taskResponses.Length > 0
+            ? taskResponses[^1]
             : string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase)
                 ? ReadString(root, "observacoesGerais")
                 : string.Empty;

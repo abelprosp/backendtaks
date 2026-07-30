@@ -78,4 +78,27 @@ public sealed class LuxusParceirosIntegrationController : ControllerBase
             return NotFound(new { message = ex.Message });
         }
     }
+
+    [HttpPost("demandas/{externalRequestId}/comentarios")]
+    public async Task<IActionResult> AddComment(
+        string externalRequestId,
+        [FromBody] AddLuxusParceirosCommentRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!_integration.IsAuthorized(Request.Headers["x-integration-key"]))
+        {
+            return Unauthorized(new { message = "Integração não autorizada" });
+        }
+        try
+        {
+            return Ok(await _integration.AddCommentAsync(
+                externalRequestId,
+                request,
+                cancellationToken));
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
+    }
 }
