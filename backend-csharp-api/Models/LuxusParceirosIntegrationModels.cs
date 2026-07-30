@@ -51,3 +51,13 @@ public sealed record LuxusParceirosClientDto(
     string? Document,
     string? TradeName,
     string? PersonType);
+
+public sealed class AddLuxusParceirosCommentRequest
+{
+    [Required]
+    [MinLength(1)]
+    public string Content { get; init; } = string.Empty;
+
+    [Required]
+    public string AuthorName { get; init; } = string.Empty;
+}
