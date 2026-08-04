@@ -43,6 +43,19 @@ public sealed class CreateLuxusParceirosDemandaRequest
     public string RequesterEmail { get; init; } = string.Empty;
 
     public bool? Priority { get; init; }
+
+    public IReadOnlyList<LuxusParceirosDocumentDto> Documents { get; init; } = [];
+}
+
+public sealed class LuxusParceirosDocumentDto
+{
+    [Required]
+    public string Id { get; init; } = string.Empty;
+    [Required]
+    public string Name { get; init; } = string.Empty;
+    public string Type { get; init; } = string.Empty;
+    public string MimeType { get; init; } = "application/octet-stream";
+    public long Size { get; init; }
 }
 
 public sealed record LuxusParceirosClientDto(

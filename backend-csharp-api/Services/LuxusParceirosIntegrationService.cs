@@ -136,6 +136,8 @@ public sealed class LuxusParceirosIntegrationService
         }
 
         var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
+        var documentLinks = request.Documents.Select(document =>
+            $"Documento {document.Type}: {document.Name} — {BuildPartnerDocumentUrl(request.RequestId, document.Id)}");
         var origin = new[]
         {
             $"Origem: Luxus Parceiros ({request.LocalProtocol})",
@@ -144,7 +146,7 @@ public sealed class LuxusParceirosIntegrationService
             $"Solicitante: {request.RequesterName} <{request.RequesterEmail}>",
             string.Empty,
             request.Description.Trim(),
-        };
+        }.Concat(documentLinks);
         var created = await _demandas.CreateAsync(
             technicalUserId,
             new CreateDemandaRequest
@@ -184,6 +186,42 @@ public sealed class LuxusParceirosIntegrationService
             },
             cancellationToken);
 
+        foreach (var document in request.Documents)
+        {
+            try
+            {
+                var httpClient = _httpClientFactory.CreateClient();
+                using var message = new HttpRequestMessage(
+                    HttpMethod.Get,
+                    BuildPartnerDocumentUrl(request.RequestId, document.Id));
+                message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
+                using var response = await httpClient.SendAsync(message, cancellationToken);
+                response.EnsureSuccessStatusCode();
+                var buffer = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+                await _demandas.AddAnexoAsync(
+                    technicalUserId,
+                    demandaId,
+                    buffer,
+                    document.Name,
+                    $"{document.Type} — {document.Name}",
+                    string.IsNullOrWhiteSpace(document.MimeType)
+                        ? "application/octet-stream"
+                        : document.MimeType,
+                    buffer.LongLength,
+                    cancellationToken);
+            }
+            catch (Exception error)
+            {
+                await _demandas.AddObservacaoAsync(
+                    technicalUserId,
+                    demandaId,
+                    $"Não foi possível copiar automaticamente o documento {document.Name}. "
+                    + $"Ele continua disponível em {BuildPartnerDocumentUrl(request.RequestId, document.Id)}. "
+                    + $"Motivo: {error.Message}",
+                    cancellationToken);
+            }
+        }
+
         return new
         {
             id = demandaId,
@@ -194,6 +232,16 @@ public sealed class LuxusParceirosIntegrationService
             updatedAt = DateTimeOffset.UtcNow,
             mappingId = mapping.GetStringOrEmpty("id"),
         };
+    }
+
+    private string BuildPartnerDocumentUrl(string saleId, string documentId)
+    {
+        if (!Uri.TryCreate(_options.LuxusParceirosCallbackUrl, UriKind.Absolute, out var callback))
+        {
+            throw new InvalidOperationException("URL de retorno do Luxus Parceiros não configurada.");
+        }
+        var origin = callback.GetLeftPart(UriPartial.Authority).TrimEnd('/');
+        return $"{origin}/integrations/luxus-task/sales/{Uri.EscapeDataString(saleId)}/documents/{Uri.EscapeDataString(documentId)}";
     }
 
     public async Task<object> GetAsync(string externalRequestId, CancellationToken cancellationToken)
