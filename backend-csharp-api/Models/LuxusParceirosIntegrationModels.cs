@@ -4,6 +4,8 @@ namespace LuxusDemandas.Api.Models;
 
 public sealed class CreateLuxusParceirosDemandaRequest
 {
+    public string? EntityType { get; init; }
+
     [Required]
     public string RequestId { get; init; } = string.Empty;
 
@@ -73,4 +75,14 @@ public sealed class AddLuxusParceirosCommentRequest
 
     [Required]
     public string AuthorName { get; init; } = string.Empty;
+}
+
+public sealed class UpdateLuxusParceirosSaleStageRequest
+{
+    [Required]
+    public string Stage { get; init; } = string.Empty;
+    public string? DocumentId { get; init; }
+    public string? DocumentName { get; init; }
+    public string? DocumentMimeType { get; init; }
+    public string? Note { get; init; }
 }

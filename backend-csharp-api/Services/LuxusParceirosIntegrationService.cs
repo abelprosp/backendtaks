@@ -151,7 +151,9 @@ public sealed class LuxusParceirosIntegrationService
             technicalUserId,
             new CreateDemandaRequest
             {
-                Assunto = request.Subject.Trim(),
+                Assunto = string.Equals(request.EntityType, "sale", StringComparison.OrdinalIgnoreCase)
+                    ? $"[Venda recebida] {request.Subject.Trim()}"
+                    : request.Subject.Trim(),
                 Prioridade = request.Priority ?? false,
                 Prazo = deadline.ToString("yyyy-MM-dd"),
                 Status = "em_aberto",
@@ -183,9 +185,11 @@ public sealed class LuxusParceirosIntegrationService
                 demanda_id = demandaId,
                 external_request_id = request.RequestId,
                 external_protocol = request.LocalProtocol,
+                entity_type = string.Equals(request.EntityType, "sale", StringComparison.OrdinalIgnoreCase) ? "sale" : "request",
             },
             cancellationToken);
 
+        var sourceAttachmentIds = new List<string>();
         foreach (var document in request.Documents)
         {
             try
@@ -198,7 +202,7 @@ public sealed class LuxusParceirosIntegrationService
                 using var response = await httpClient.SendAsync(message, cancellationToken);
                 response.EnsureSuccessStatusCode();
                 var buffer = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-                await _demandas.AddAnexoAsync(
+                var imported = await _demandas.AddAnexoAsync(
                     technicalUserId,
                     demandaId,
                     buffer,
@@ -209,6 +213,9 @@ public sealed class LuxusParceirosIntegrationService
                         : document.MimeType,
                     buffer.LongLength,
                     cancellationToken);
+                using var importedJson = JsonDocument.Parse(JsonSerializer.Serialize(imported));
+                var importedId = ReadString(importedJson.RootElement, "id");
+                if (!string.IsNullOrWhiteSpace(importedId)) sourceAttachmentIds.Add(importedId);
             }
             catch (Exception error)
             {
@@ -221,6 +228,12 @@ public sealed class LuxusParceirosIntegrationService
                     cancellationToken);
             }
         }
+
+        await _supabase.UpdateSingleAsync(
+            "luxus_parceiros_demanda",
+            $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
+            new { source_attachment_ids = sourceAttachmentIds },
+            cancellationToken);
 
         return new
         {
@@ -267,6 +280,100 @@ public sealed class LuxusParceirosIntegrationService
             cancellationToken);
     }
 
+    public async Task<object> UpdateSaleStageAsync(
+        string externalRequestId,
+        UpdateLuxusParceirosSaleStageRequest request,
+        CancellationToken cancellationToken)
+    {
+        var allowed = new[] { "AWAITING_PARTNER_SIGNATURE", "TASK_VALIDATING_SIGNED_CONTRACT" };
+        if (!allowed.Contains(request.Stage, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Etapa de venda inválida para esta operação.");
+
+        var mapping = await FindMappingByExternalIdAsync(externalRequestId, cancellationToken)
+                      ?? throw new KeyNotFoundException("Demanda integrada não encontrada.");
+        if (!string.Equals(mapping.GetNullableString("entity_type"), "sale", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("A demanda informada não pertence ao fluxo de vendas.");
+        var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
+        var demandaId = mapping.GetStringOrEmpty("demanda_id");
+
+        if (string.Equals(request.Stage, "TASK_VALIDATING_SIGNED_CONTRACT", StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.IsNullOrWhiteSpace(request.DocumentId) || string.IsNullOrWhiteSpace(request.DocumentName))
+                throw new InvalidOperationException("Informe o contrato assinado que será enviado.");
+            var client = _httpClientFactory.CreateClient();
+            using var message = new HttpRequestMessage(HttpMethod.Get, BuildPartnerDocumentUrl(externalRequestId, request.DocumentId));
+            message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
+            using var response = await client.SendAsync(message, cancellationToken);
+            response.EnsureSuccessStatusCode();
+            var buffer = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+            await _demandas.AddAnexoAsync(
+                technicalUserId,
+                demandaId,
+                buffer,
+                request.DocumentName,
+                $"CONTRATO ASSINADO — {request.DocumentName}",
+                request.DocumentMimeType ?? "application/pdf",
+                buffer.LongLength,
+                cancellationToken);
+
+            var current = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
+            using var currentJson = JsonDocument.Parse(JsonSerializer.Serialize(current));
+            var subject = StripWorkflowPrefix(ReadString(currentJson.RootElement, "assunto"));
+            await _demandas.UpdateAsync(technicalUserId, demandaId, new UpdateDemandaRequest
+            {
+                Status = "em_andamento",
+                Assunto = $"[Contrato assinado recebido] {subject}",
+            }, cancellationToken);
+        }
+
+        var label = string.Equals(request.Stage, "AWAITING_PARTNER_SIGNATURE", StringComparison.OrdinalIgnoreCase)
+            ? "Aguardando assinatura do parceiro"
+            : "Contrato assinado recebido — aguardando validação final";
+        await _demandas.AddObservacaoAsync(
+            technicalUserId,
+            demandaId,
+            $"[ETAPA LUXUS PARCEIROS] {label}. {request.Note}".Trim(),
+            cancellationToken);
+        var demandForLabel = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
+        using (var labelJson = JsonDocument.Parse(JsonSerializer.Serialize(demandForLabel)))
+        {
+            var cleanSubject = StripWorkflowPrefix(ReadString(labelJson.RootElement, "assunto"));
+            await _supabase.UpdateSingleAsync(
+                "Demanda",
+                $"id=eq.{Uri.EscapeDataString(demandaId)}",
+                new
+                {
+                    assunto = string.Equals(request.Stage, "AWAITING_PARTNER_SIGNATURE", StringComparison.OrdinalIgnoreCase)
+                        ? $"[Aguardando assinatura] {cleanSubject}"
+                        : $"[Contrato assinado recebido] {cleanSubject}",
+                },
+                cancellationToken);
+        }
+        await _supabase.UpdateSingleAsync(
+            "luxus_parceiros_demanda",
+            $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
+            new { workflow_stage = request.Stage, updated_at = DateTimeOffset.UtcNow },
+            cancellationToken);
+        var refreshed = await FindMappingByExternalIdAsync(externalRequestId, cancellationToken)
+                        ?? throw new KeyNotFoundException("Demanda integrada não encontrada.");
+        return await BuildResponseAsync(refreshed, cancellationToken);
+    }
+
+    public async Task<DemandaDownloadResult> DownloadAttachmentAsync(
+        string externalRequestId,
+        string attachmentId,
+        CancellationToken cancellationToken)
+    {
+        var mapping = await FindMappingByExternalIdAsync(externalRequestId, cancellationToken)
+                      ?? throw new KeyNotFoundException("Demanda integrada não encontrada.");
+        var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
+        return await _demandas.GetAnexoForDownloadAsync(
+            technicalUserId,
+            mapping.GetStringOrEmpty("demanda_id"),
+            attachmentId,
+            cancellationToken);
+    }
+
     public async Task NotifyIfIntegratedAsync(
         string demandaId,
         object currentDemand,
@@ -283,7 +390,7 @@ public sealed class LuxusParceirosIntegrationService
 
         try
         {
-            var payload = BuildCallbackPayload(mapping, currentDemand);
+            var payload = await BuildCallbackPayloadAsync(mapping, currentDemand, cancellationToken);
             if (!string.IsNullOrWhiteSpace(_options.LuxusParceirosCallbackUrl))
             {
                 var client = _httpClientFactory.CreateClient();
@@ -334,10 +441,13 @@ public sealed class LuxusParceirosIntegrationService
             technicalUserId,
             mapping.GetStringOrEmpty("demanda_id"),
             cancellationToken);
-        return BuildCallbackPayload(mapping, demand);
+        return await BuildCallbackPayloadAsync(mapping, demand, cancellationToken);
     }
 
-    private object BuildCallbackPayload(JsonElement mapping, object demand)
+    private async Task<object> BuildCallbackPayloadAsync(
+        JsonElement mapping,
+        object demand,
+        CancellationToken cancellationToken)
     {
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(demand));
         var root = document.RootElement;
@@ -359,6 +469,51 @@ public sealed class LuxusParceirosIntegrationService
         }
         var user = ReadObject(principal, "user");
         var taskStatus = ReadString(root, "status");
+        var isSaleWorkflow = string.Equals(mapping.GetNullableString("entity_type"), "sale", StringComparison.OrdinalIgnoreCase);
+        var workflowStage = isSaleWorkflow
+            ? mapping.GetNullableString("workflow_stage") ?? "TASK_PROCESSING"
+            : string.Empty;
+        var sourceIds = mapping.GetArrayOrEmpty("source_attachment_ids")
+            .Select(value => value.ValueKind == JsonValueKind.String ? value.GetString() : null)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var workflowAttachments = ReadArray(root, "anexos")
+            .Where(item => !sourceIds.Contains(ReadString(item, "id")))
+            .Select(item => new
+            {
+                id = ReadString(item, "id"),
+                name = ReadString(item, "filename"),
+                mimeType = ReadString(item, "mime_type"),
+                size = ReadLong(item, "size"),
+                createdAt = ReadString(item, "created_at"),
+            })
+            .Where(item => !string.IsNullOrWhiteSpace(item.id))
+            .ToArray();
+        if (isSaleWorkflow && string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase))
+        {
+            var next = string.Equals(workflowStage, "TASK_VALIDATING_SIGNED_CONTRACT", StringComparison.OrdinalIgnoreCase)
+                ? "COMPLETED"
+                : string.Equals(workflowStage, "TASK_PROCESSING", StringComparison.OrdinalIgnoreCase)
+                  && workflowAttachments.Length > 0
+                    ? "BLANK_CONTRACT_READY_FOR_ADMIN"
+                    : workflowStage;
+            if (!string.Equals(next, workflowStage, StringComparison.OrdinalIgnoreCase))
+            {
+                workflowStage = next;
+                await _supabase.UpdateSingleAsync(
+                    "luxus_parceiros_demanda",
+                    $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
+                    new { workflow_stage = workflowStage, updated_at = DateTimeOffset.UtcNow },
+                    cancellationToken);
+                var cleanSubject = StripWorkflowPrefix(ReadString(root, "assunto"));
+                var prefix = workflowStage == "COMPLETED" ? "Contrato aprovado" : "Contrato em branco enviado";
+                await _supabase.UpdateSingleAsync(
+                    "Demanda",
+                    $"id=eq.{Uri.EscapeDataString(ReadString(root, "id"))}",
+                    new { assunto = $"[{prefix}] {cleanSubject}" },
+                    cancellationToken);
+            }
+        }
         var resolution = taskResponses.Length > 0
             ? taskResponses[^1]
             : string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase)
@@ -371,6 +526,8 @@ public sealed class LuxusParceirosIntegrationService
             id = ReadString(root, "id"),
             protocol = ReadString(root, "protocolo"),
             status = taskStatus,
+            workflowStage,
+            attachments = workflowStage == "BLANK_CONTRACT_READY_FOR_ADMIN" ? workflowAttachments : [],
             resolution,
             observations,
             responsibleId = ReadString(user, "id"),
@@ -384,6 +541,9 @@ public sealed class LuxusParceirosIntegrationService
             updatedAt = ReadString(root, "updatedAt"),
         };
     }
+
+    private static string StripWorkflowPrefix(string subject) =>
+        Regex.Replace(subject ?? string.Empty, @"^\[[^\]]+\]\s*", string.Empty).Trim();
 
     private async Task<string> EnsureTechnicalUserAsync(CancellationToken cancellationToken)
     {
@@ -439,6 +599,12 @@ public sealed class LuxusParceirosIntegrationService
         element.ValueKind == JsonValueKind.Object
         && element.TryGetProperty(name, out var value)
         && value.ValueKind == JsonValueKind.True;
+
+    private static long ReadLong(JsonElement element, string name)
+    {
+        var raw = ReadString(element, name);
+        return long.TryParse(raw, out var value) ? value : 0;
+    }
 
     private static JsonElement ReadObject(JsonElement element, string name)
     {

@@ -101,4 +101,37 @@ public sealed class LuxusParceirosIntegrationController : ControllerBase
             return NotFound(new { message = ex.Message });
         }
     }
+
+    [HttpPost("demandas/{externalRequestId}/etapa-venda")]
+    public async Task<IActionResult> UpdateSaleStage(
+        string externalRequestId,
+        [FromBody] UpdateLuxusParceirosSaleStageRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!_integration.IsAuthorized(Request.Headers["x-integration-key"]))
+            return Unauthorized(new { message = "Integração não autorizada" });
+        try
+        {
+            return Ok(await _integration.UpdateSaleStageAsync(externalRequestId, request, cancellationToken));
+        }
+        catch (KeyNotFoundException ex) { return NotFound(new { message = ex.Message }); }
+        catch (InvalidOperationException ex) { return BadRequest(new { message = ex.Message }); }
+    }
+
+    [HttpGet("demandas/{externalRequestId}/anexos/{attachmentId}")]
+    public async Task<IActionResult> DownloadAttachment(
+        string externalRequestId,
+        string attachmentId,
+        CancellationToken cancellationToken)
+    {
+        if (!_integration.IsAuthorized(Request.Headers["x-integration-key"]))
+            return Unauthorized(new { message = "Integração não autorizada" });
+        try
+        {
+            var file = await _integration.DownloadAttachmentAsync(externalRequestId, attachmentId, cancellationToken);
+            Response.Headers["x-file-name"] = Uri.EscapeDataString(file.Filename);
+            return File(file.Buffer, file.MimeType, file.Filename);
+        }
+        catch (KeyNotFoundException ex) { return NotFound(new { message = ex.Message }); }
+    }
 }
