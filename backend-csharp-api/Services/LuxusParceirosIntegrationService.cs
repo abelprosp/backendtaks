@@ -11,6 +11,9 @@ namespace LuxusDemandas.Api.Services;
 
 public sealed class LuxusParceirosIntegrationService
 {
+    private const string DefaultLuxusParceirosCallbackUrl =
+        "https://luxusparceiros-production-df5d.up.railway.app/api/integrations/luxus-task/callback";
+
     private readonly SupabaseRestService _supabase;
     private readonly DemandasService _demandas;
     private readonly ClientesService _clientes;
@@ -250,7 +253,7 @@ public sealed class LuxusParceirosIntegrationService
     private string BuildPartnerDocumentUrl(string saleId, string documentId)
     {
         var configured = string.IsNullOrWhiteSpace(_options.LuxusParceirosCallbackUrl)
-            ? "https://parceiros.grupoluxus.com.br/api/integrations/luxus-task/callback"
+            ? DefaultLuxusParceirosCallbackUrl
             : _options.LuxusParceirosCallbackUrl;
         if (!Uri.TryCreate(configured, UriKind.Absolute, out var callback)
             || (callback.Scheme != Uri.UriSchemeHttp && callback.Scheme != Uri.UriSchemeHttps))
@@ -318,7 +321,7 @@ public sealed class LuxusParceirosIntegrationService
             using var response = await client.SendAsync(message, cancellationToken);
             response.EnsureSuccessStatusCode();
             var buffer = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-            await _demandas.AddAnexoAsync(
+            var importedSigned = await _demandas.AddAnexoAsync(
                 technicalUserId,
                 demandaId,
                 buffer,
@@ -327,6 +330,22 @@ public sealed class LuxusParceirosIntegrationService
                 request.DocumentMimeType ?? "application/pdf",
                 buffer.LongLength,
                 cancellationToken);
+            using var importedSignedJson = JsonDocument.Parse(JsonSerializer.Serialize(importedSigned));
+            var importedSignedId = ReadString(importedSignedJson.RootElement, "id");
+            if (!string.IsNullOrWhiteSpace(importedSignedId))
+            {
+                var existingSourceIds = mapping.GetArrayOrEmpty("source_attachment_ids")
+                    .Select(value => value.ValueKind == JsonValueKind.String ? value.GetString() : null)
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Select(value => value!)
+                    .ToList();
+                existingSourceIds.Add(importedSignedId);
+                await _supabase.UpdateSingleAsync(
+                    "luxus_parceiros_demanda",
+                    $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
+                    new { source_attachment_ids = existingSourceIds.Distinct(StringComparer.OrdinalIgnoreCase).ToArray() },
+                    cancellationToken);
+            }
 
             var current = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
             using var currentJson = JsonDocument.Parse(JsonSerializer.Serialize(current));
@@ -386,6 +405,92 @@ public sealed class LuxusParceirosIntegrationService
             cancellationToken);
     }
 
+    public async Task<object> ImportPartnerDocumentsAsync(
+        string externalRequestId,
+        ImportLuxusParceirosDocumentsRequest request,
+        CancellationToken cancellationToken)
+    {
+        var mapping = await FindMappingByExternalIdAsync(externalRequestId, cancellationToken)
+                      ?? throw new KeyNotFoundException("Demanda integrada não encontrada.");
+        var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
+        var demandaId = mapping.GetStringOrEmpty("demanda_id");
+        var demand = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
+        using var demandJson = JsonDocument.Parse(JsonSerializer.Serialize(demand));
+        var existingNames = ReadArray(demandJson.RootElement, "anexos")
+            .Select(item => ReadString(item, "filename"))
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var sourceAttachmentIds = mapping.GetArrayOrEmpty("source_attachment_ids")
+            .Select(value => value.ValueKind == JsonValueKind.String ? value.GetString() : null)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!)
+            .ToList();
+        var imported = 0;
+        foreach (var document in request.Documents)
+        {
+            if (string.IsNullOrWhiteSpace(document.Id) || string.IsNullOrWhiteSpace(document.Name))
+                continue;
+            if (existingNames.Contains(document.Name)) continue;
+            try
+            {
+                var httpClient = _httpClientFactory.CreateClient();
+                using var message = new HttpRequestMessage(
+                    HttpMethod.Get,
+                    BuildPartnerDocumentUrl(externalRequestId, document.Id));
+                message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
+                using var response = await httpClient.SendAsync(message, cancellationToken);
+                response.EnsureSuccessStatusCode();
+                var buffer = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+                var mimeType = string.IsNullOrWhiteSpace(document.MimeType)
+                    ? response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream"
+                    : document.MimeType;
+                var created = await _demandas.AddAnexoAsync(
+                    technicalUserId,
+                    demandaId,
+                    buffer,
+                    document.Name,
+                    $"{document.Type} — {document.Name}",
+                    mimeType,
+                    buffer.LongLength,
+                    cancellationToken);
+                using var createdJson = JsonDocument.Parse(JsonSerializer.Serialize(created));
+                var createdId = ReadString(createdJson.RootElement, "id");
+                if (!string.IsNullOrWhiteSpace(createdId)) sourceAttachmentIds.Add(createdId);
+                existingNames.Add(document.Name);
+                imported++;
+            }
+            catch (Exception error)
+            {
+                await _demandas.AddObservacaoAsync(
+                    technicalUserId,
+                    demandaId,
+                    $"Não foi possível copiar automaticamente o documento {document.Name}. Motivo: {error.Message}",
+                    cancellationToken);
+            }
+        }
+
+        if (imported > 0)
+        {
+            await _supabase.UpdateSingleAsync(
+                "luxus_parceiros_demanda",
+                $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
+                new { source_attachment_ids = sourceAttachmentIds.Distinct(StringComparer.OrdinalIgnoreCase).ToArray() },
+                cancellationToken);
+            mapping = await FindMappingByExternalIdAsync(externalRequestId, cancellationToken) ?? mapping;
+            demand = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
+            await NotifyIfIntegratedAsync(demandaId, demand, cancellationToken);
+        }
+
+        return new { imported, total = request.Documents.Count };
+    }
+
+    public async Task NotifyByDemandaIdAsync(string demandaId, CancellationToken cancellationToken)
+    {
+        var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
+        var demand = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
+        await NotifyIfIntegratedAsync(demandaId, demand, cancellationToken);
+    }
+
     public async Task NotifyIfIntegratedAsync(
         string demandaId,
         object currentDemand,
@@ -404,7 +509,7 @@ public sealed class LuxusParceirosIntegrationService
         {
             var payload = await BuildCallbackPayloadAsync(mapping, currentDemand, cancellationToken);
             var callbackUrl = string.IsNullOrWhiteSpace(_options.LuxusParceirosCallbackUrl)
-                ? "https://parceiros.grupoluxus.com.br/api/integrations/luxus-task/callback"
+                ? DefaultLuxusParceirosCallbackUrl
                 : _options.LuxusParceirosCallbackUrl;
             if (!string.IsNullOrWhiteSpace(callbackUrl))
             {
@@ -456,7 +561,109 @@ public sealed class LuxusParceirosIntegrationService
             technicalUserId,
             mapping.GetStringOrEmpty("demanda_id"),
             cancellationToken);
+
+        if (await ImportMissingPartnerDocumentsAsync(mapping, demand, technicalUserId, cancellationToken))
+        {
+            mapping = await FindMappingByExternalIdAsync(
+                mapping.GetStringOrEmpty("external_request_id"),
+                cancellationToken) ?? mapping;
+            demand = await _demandas.FindOneAsync(
+                technicalUserId,
+                mapping.GetStringOrEmpty("demanda_id"),
+                cancellationToken);
+        }
+
         return await BuildCallbackPayloadAsync(mapping, demand, cancellationToken);
+    }
+
+    private async Task<bool> ImportMissingPartnerDocumentsAsync(
+        JsonElement mapping,
+        object demand,
+        string technicalUserId,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(mapping.GetNullableString("entity_type"), "sale", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        using var demandJson = JsonDocument.Parse(JsonSerializer.Serialize(demand));
+        var root = demandJson.RootElement;
+        var instructions = ReadString(root, "observacoesGerais");
+        if (string.IsNullOrWhiteSpace(instructions))
+        {
+            return false;
+        }
+
+        var existingNames = ReadArray(root, "anexos")
+            .Select(item => ReadString(item, "filename"))
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var sourceAttachmentIds = mapping.GetArrayOrEmpty("source_attachment_ids")
+            .Select(value => value.ValueKind == JsonValueKind.String ? value.GetString() : null)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!)
+            .ToList();
+        var importedAny = false;
+        var documentPattern = new Regex(
+            @"^Documento\s+(?<type>[^:]+):\s*(?<name>.+?)\s+[—-]\s+https?://\S+/documents/(?<id>[0-9a-f-]+)\s*$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        foreach (var line in instructions.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var match = documentPattern.Match(line);
+            if (!match.Success) continue;
+
+            var documentId = match.Groups["id"].Value;
+            var documentName = match.Groups["name"].Value.Trim();
+            var documentType = match.Groups["type"].Value.Trim();
+            if (string.IsNullOrWhiteSpace(documentId)
+                || string.IsNullOrWhiteSpace(documentName)
+                || existingNames.Contains(documentName))
+            {
+                continue;
+            }
+
+            try
+            {
+                var httpClient = _httpClientFactory.CreateClient();
+                using var message = new HttpRequestMessage(
+                    HttpMethod.Get,
+                    BuildPartnerDocumentUrl(mapping.GetStringOrEmpty("external_request_id"), documentId));
+                message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
+                using var response = await httpClient.SendAsync(message, cancellationToken);
+                response.EnsureSuccessStatusCode();
+                var buffer = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+                var mimeType = response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
+                var imported = await _demandas.AddAnexoAsync(
+                    technicalUserId,
+                    mapping.GetStringOrEmpty("demanda_id"),
+                    buffer,
+                    documentName,
+                    $"{documentType} — {documentName}",
+                    mimeType,
+                    buffer.LongLength,
+                    cancellationToken);
+                using var importedJson = JsonDocument.Parse(JsonSerializer.Serialize(imported));
+                var importedId = ReadString(importedJson.RootElement, "id");
+                if (!string.IsNullOrWhiteSpace(importedId)) sourceAttachmentIds.Add(importedId);
+                existingNames.Add(documentName);
+                importedAny = true;
+            }
+            catch
+            {
+                // A consulta permanece idempotente e tentará novamente na próxima sincronização.
+            }
+        }
+
+        if (!importedAny) return false;
+
+        await _supabase.UpdateSingleAsync(
+            "luxus_parceiros_demanda",
+            $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
+            new { source_attachment_ids = sourceAttachmentIds.Distinct(StringComparer.OrdinalIgnoreCase).ToArray() },
+            cancellationToken);
+        return true;
     }
 
     private async Task<object> BuildCallbackPayloadAsync(
@@ -584,7 +791,8 @@ public sealed class LuxusParceirosIntegrationService
             protocol = ReadString(root, "protocolo"),
             status = taskStatus,
             workflowStage,
-            attachments = workflowStage == "BLANK_CONTRACT_READY_FOR_ADMIN" ? workflowAttachments : [],
+            // Sempre envia anexos criados no Task (exceto os que vieram do Parceiros).
+            attachments = workflowAttachments,
             resolution,
             observations,
             responsibleId = ReadString(user, "id"),

@@ -86,3 +86,10 @@ public sealed class UpdateLuxusParceirosSaleStageRequest
     public string? DocumentMimeType { get; init; }
     public string? Note { get; init; }
 }
+
+public sealed class ImportLuxusParceirosDocumentsRequest
+{
+    [Required]
+    [MinLength(1)]
+    public IReadOnlyList<LuxusParceirosDocumentDto> Documents { get; init; } = [];
+}

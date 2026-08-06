@@ -206,7 +206,7 @@ public sealed class DemandasController : ControllerBase
 
         try
         {
-            return Ok(await _demandas.AddAnexoAsync(
+            var created = await _demandas.AddAnexoAsync(
                 User.GetUserId(),
                 id,
                 memory.ToArray(),
@@ -214,7 +214,17 @@ public sealed class DemandasController : ControllerBase
                 nome,
                 file.ContentType,
                 file.Length,
-                cancellationToken));
+                cancellationToken);
+            try
+            {
+                var updated = await _demandas.FindOneAsync(User.GetUserId(), id, cancellationToken);
+                await _luxusParceiros.NotifyIfIntegratedAsync(id, updated, cancellationToken);
+            }
+            catch
+            {
+                // Anexo já foi salvo; falha no callback não deve reverter o upload.
+            }
+            return Ok(created);
         }
         catch (KeyNotFoundException ex)
         {

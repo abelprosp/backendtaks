@@ -134,4 +134,33 @@ public sealed class LuxusParceirosIntegrationController : ControllerBase
         }
         catch (KeyNotFoundException ex) { return NotFound(new { message = ex.Message }); }
     }
+
+    [HttpPost("demandas/{externalRequestId}/anexos")]
+    public async Task<IActionResult> ImportDocuments(
+        string externalRequestId,
+        [FromBody] ImportLuxusParceirosDocumentsRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!_integration.IsAuthorized(Request.Headers["x-integration-key"]))
+            return Unauthorized(new { message = "Integração não autorizada" });
+        try
+        {
+            return Ok(await _integration.ImportPartnerDocumentsAsync(externalRequestId, request, cancellationToken));
+        }
+        catch (KeyNotFoundException ex) { return NotFound(new { message = ex.Message }); }
+        catch (InvalidOperationException ex) { return BadRequest(new { message = ex.Message }); }
+    }
+
+    [HttpPost("notify/{demandaId}")]
+    public async Task<IActionResult> Notify(string demandaId, CancellationToken cancellationToken)
+    {
+        if (!_integration.IsAuthorized(Request.Headers["x-integration-key"]))
+            return Unauthorized(new { message = "Integração não autorizada" });
+        try
+        {
+            await _integration.NotifyByDemandaIdAsync(demandaId, cancellationToken);
+            return Ok(new { accepted = true });
+        }
+        catch (KeyNotFoundException ex) { return NotFound(new { message = ex.Message }); }
+    }
 }
