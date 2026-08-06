@@ -249,12 +249,24 @@ public sealed class LuxusParceirosIntegrationService
 
     private string BuildPartnerDocumentUrl(string saleId, string documentId)
     {
-        if (!Uri.TryCreate(_options.LuxusParceirosCallbackUrl, UriKind.Absolute, out var callback))
+        var configured = string.IsNullOrWhiteSpace(_options.LuxusParceirosCallbackUrl)
+            ? "https://parceiros.grupoluxus.com.br/api/integrations/luxus-task/callback"
+            : _options.LuxusParceirosCallbackUrl;
+        if (!Uri.TryCreate(configured, UriKind.Absolute, out var callback)
+            || (callback.Scheme != Uri.UriSchemeHttp && callback.Scheme != Uri.UriSchemeHttps))
         {
-            throw new InvalidOperationException("URL de retorno do Luxus Parceiros não configurada.");
+            throw new InvalidOperationException("URL de retorno do Luxus Parceiros inválida.");
         }
-        var origin = callback.GetLeftPart(UriPartial.Authority).TrimEnd('/');
-        return $"{origin}/integrations/luxus-task/sales/{Uri.EscapeDataString(saleId)}/documents/{Uri.EscapeDataString(documentId)}";
+        var path = callback.AbsolutePath.TrimEnd('/');
+        const string callbackSuffix = "/callback";
+        if (path.EndsWith(callbackSuffix, StringComparison.OrdinalIgnoreCase))
+            path = path[..^callbackSuffix.Length];
+        var builder = new UriBuilder(callback)
+        {
+            Path = $"{path}/sales/{Uri.EscapeDataString(saleId)}/documents/{Uri.EscapeDataString(documentId)}",
+            Query = string.Empty,
+        };
+        return builder.Uri.ToString();
     }
 
     public async Task<object> GetAsync(string externalRequestId, CancellationToken cancellationToken)
@@ -391,12 +403,15 @@ public sealed class LuxusParceirosIntegrationService
         try
         {
             var payload = await BuildCallbackPayloadAsync(mapping, currentDemand, cancellationToken);
-            if (!string.IsNullOrWhiteSpace(_options.LuxusParceirosCallbackUrl))
+            var callbackUrl = string.IsNullOrWhiteSpace(_options.LuxusParceirosCallbackUrl)
+                ? "https://parceiros.grupoluxus.com.br/api/integrations/luxus-task/callback"
+                : _options.LuxusParceirosCallbackUrl;
+            if (!string.IsNullOrWhiteSpace(callbackUrl))
             {
                 var client = _httpClientFactory.CreateClient();
                 using var message = new HttpRequestMessage(
                     HttpMethod.Post,
-                    _options.LuxusParceirosCallbackUrl)
+                    callbackUrl)
                 {
                     Content = JsonContent.Create(payload),
                 };
@@ -468,6 +483,32 @@ public sealed class LuxusParceirosIntegrationService
             principal = responsibles.FirstOrDefault();
         }
         var user = ReadObject(principal, "user");
+        var responsibleId = ReadString(user, "id");
+        var editorName = string.Empty;
+        var editorActivity = string.Empty;
+        string? editorLastSeenAt = null;
+        var isBeingEdited = false;
+        if (!string.IsNullOrWhiteSpace(responsibleId))
+        {
+            var presenceRows = await _supabase.QueryRowsAsync(
+                $"user_presence?select=status,pathname,page_label,activity,last_seen_at&user_id=eq.{Uri.EscapeDataString(responsibleId)}&limit=1",
+                cancellationToken);
+            var presence = presenceRows.FirstOrDefault();
+            if (presence.ValueKind != JsonValueKind.Undefined)
+            {
+                editorName = ReadString(user, "name");
+                editorActivity = presence.GetNullableString("activity")
+                    ?? presence.GetNullableString("page_label")
+                    ?? string.Empty;
+                editorLastSeenAt = presence.GetNullableString("last_seen_at");
+                var pathname = presence.GetNullableString("pathname") ?? string.Empty;
+                var status = presence.GetNullableString("status") ?? "online";
+                isBeingEdited = DateTimeOffset.TryParse(editorLastSeenAt, out var lastSeen)
+                    && lastSeen >= DateTimeOffset.UtcNow.AddSeconds(-90)
+                    && !string.Equals(status, "offline", StringComparison.OrdinalIgnoreCase)
+                    && pathname.Contains(ReadString(root, "id"), StringComparison.OrdinalIgnoreCase);
+            }
+        }
         var taskStatus = ReadString(root, "status");
         var isSaleWorkflow = string.Equals(mapping.GetNullableString("entity_type"), "sale", StringComparison.OrdinalIgnoreCase);
         var workflowStage = isSaleWorkflow
@@ -489,11 +530,22 @@ public sealed class LuxusParceirosIntegrationService
             })
             .Where(item => !string.IsNullOrWhiteSpace(item.id))
             .ToArray();
-        if (isSaleWorkflow && string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase))
+        if (isSaleWorkflow
+            && (string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(taskStatus, "cancelado", StringComparison.OrdinalIgnoreCase)))
         {
-            var next = string.Equals(workflowStage, "TASK_VALIDATING_SIGNED_CONTRACT", StringComparison.OrdinalIgnoreCase)
-                ? "COMPLETED"
+            var validatingSignedContract = string.Equals(
+                workflowStage,
+                "TASK_VALIDATING_SIGNED_CONTRACT",
+                StringComparison.OrdinalIgnoreCase);
+            var next = string.Equals(taskStatus, "cancelado", StringComparison.OrdinalIgnoreCase)
+                ? "TASK_REJECTED_REVIEW_PENDING"
+                : validatingSignedContract
+                ? string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase)
+                    ? "TASK_APPROVED_REVIEW_PENDING"
+                    : "TASK_REJECTED_REVIEW_PENDING"
                 : string.Equals(workflowStage, "TASK_PROCESSING", StringComparison.OrdinalIgnoreCase)
+                  && string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase)
                   && workflowAttachments.Length > 0
                     ? "BLANK_CONTRACT_READY_FOR_ADMIN"
                     : workflowStage;
@@ -506,7 +558,12 @@ public sealed class LuxusParceirosIntegrationService
                     new { workflow_stage = workflowStage, updated_at = DateTimeOffset.UtcNow },
                     cancellationToken);
                 var cleanSubject = StripWorkflowPrefix(ReadString(root, "assunto"));
-                var prefix = workflowStage == "COMPLETED" ? "Contrato aprovado" : "Contrato em branco enviado";
+                var prefix = workflowStage switch
+                {
+                    "TASK_APPROVED_REVIEW_PENDING" => "Contrato aprovado - aguardando admin",
+                    "TASK_REJECTED_REVIEW_PENDING" => "Contrato recusado - aguardando admin",
+                    _ => "Contrato em branco enviado",
+                };
                 await _supabase.UpdateSingleAsync(
                     "Demanda",
                     $"id=eq.{Uri.EscapeDataString(ReadString(root, "id"))}",
@@ -532,6 +589,10 @@ public sealed class LuxusParceirosIntegrationService
             observations,
             responsibleId = ReadString(user, "id"),
             responsibleName = ReadString(user, "name"),
+            isBeingEdited,
+            editorName,
+            editorActivity,
+            editorLastSeenAt,
             responsible = new
             {
                 id = ReadString(user, "id"),
