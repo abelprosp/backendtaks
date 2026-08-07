@@ -155,7 +155,7 @@ public sealed class LuxusParceirosIntegrationService
             new CreateDemandaRequest
             {
                 Assunto = string.Equals(request.EntityType, "sale", StringComparison.OrdinalIgnoreCase)
-                    ? $"[Venda recebida] {request.Subject.Trim()}"
+                    ? $"[Aguardando Luxus Task] {request.Subject.Trim()}"
                     : request.Subject.Trim(),
                 Prioridade = request.Priority ?? false,
                 Prazo = deadline.ToString("yyyy-MM-dd"),
@@ -197,15 +197,11 @@ public sealed class LuxusParceirosIntegrationService
         {
             try
             {
-                var httpClient = _httpClientFactory.CreateClient();
-                using var message = new HttpRequestMessage(
-                    HttpMethod.Get,
-                    BuildPartnerDocumentUrl(request.RequestId, document.Id));
-                message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
-                using var response = await httpClient.SendAsync(message, cancellationToken);
-                response.EnsureSuccessStatusCode();
-                var buffer = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-                var imported = await _demandas.AddAnexoAsync(
+                var buffer = await DownloadPartnerDocumentBufferAsync(
+                    request.RequestId,
+                    document.Id,
+                    cancellationToken);
+                var imported = await _demandas.AddAnexoForIntegrationAsync(
                     technicalUserId,
                     demandaId,
                     buffer,
@@ -315,13 +311,8 @@ public sealed class LuxusParceirosIntegrationService
         {
             if (string.IsNullOrWhiteSpace(request.DocumentId) || string.IsNullOrWhiteSpace(request.DocumentName))
                 throw new InvalidOperationException("Informe o contrato assinado que será enviado.");
-            var client = _httpClientFactory.CreateClient();
-            using var message = new HttpRequestMessage(HttpMethod.Get, BuildPartnerDocumentUrl(externalRequestId, request.DocumentId));
-            message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
-            using var response = await client.SendAsync(message, cancellationToken);
-            response.EnsureSuccessStatusCode();
-            var buffer = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-            var importedSigned = await _demandas.AddAnexoAsync(
+            var buffer = await DownloadPartnerDocumentBufferAsync(externalRequestId, request.DocumentId, cancellationToken);
+            var importedSigned = await _demandas.AddAnexoForIntegrationAsync(
                 technicalUserId,
                 demandaId,
                 buffer,
@@ -353,7 +344,7 @@ public sealed class LuxusParceirosIntegrationService
             await _demandas.UpdateAsync(technicalUserId, demandaId, new UpdateDemandaRequest
             {
                 Status = "em_andamento",
-                Assunto = $"[Contrato assinado recebido] {subject}",
+                Assunto = $"[Contrato assinado enviado para conferência] {subject}",
             }, cancellationToken);
         }
 
@@ -375,8 +366,8 @@ public sealed class LuxusParceirosIntegrationService
                 new
                 {
                     assunto = string.Equals(request.Stage, "AWAITING_PARTNER_SIGNATURE", StringComparison.OrdinalIgnoreCase)
-                        ? $"[Aguardando assinatura] {cleanSubject}"
-                        : $"[Contrato assinado recebido] {cleanSubject}",
+                        ? $"[Aguardando assinatura do parceiro] {cleanSubject}"
+                        : $"[Contrato assinado enviado para conferência] {cleanSubject}",
                 },
                 cancellationToken);
         }
@@ -433,18 +424,11 @@ public sealed class LuxusParceirosIntegrationService
             if (existingNames.Contains(document.Name)) continue;
             try
             {
-                var httpClient = _httpClientFactory.CreateClient();
-                using var message = new HttpRequestMessage(
-                    HttpMethod.Get,
-                    BuildPartnerDocumentUrl(externalRequestId, document.Id));
-                message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
-                using var response = await httpClient.SendAsync(message, cancellationToken);
-                response.EnsureSuccessStatusCode();
-                var buffer = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+                var buffer = await DownloadPartnerDocumentBufferAsync(externalRequestId, document.Id, cancellationToken);
                 var mimeType = string.IsNullOrWhiteSpace(document.MimeType)
-                    ? response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream"
+                    ? "application/octet-stream"
                     : document.MimeType;
-                var created = await _demandas.AddAnexoAsync(
+                var created = await _demandas.AddAnexoForIntegrationAsync(
                     technicalUserId,
                     demandaId,
                     buffer,
@@ -626,16 +610,12 @@ public sealed class LuxusParceirosIntegrationService
 
             try
             {
-                var httpClient = _httpClientFactory.CreateClient();
-                using var message = new HttpRequestMessage(
-                    HttpMethod.Get,
-                    BuildPartnerDocumentUrl(mapping.GetStringOrEmpty("external_request_id"), documentId));
-                message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
-                using var response = await httpClient.SendAsync(message, cancellationToken);
-                response.EnsureSuccessStatusCode();
-                var buffer = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-                var mimeType = response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
-                var imported = await _demandas.AddAnexoAsync(
+                var buffer = await DownloadPartnerDocumentBufferAsync(
+                    mapping.GetStringOrEmpty("external_request_id"),
+                    documentId,
+                    cancellationToken);
+                var mimeType = "application/octet-stream";
+                var imported = await _demandas.AddAnexoForIntegrationAsync(
                     technicalUserId,
                     mapping.GetStringOrEmpty("demanda_id"),
                     buffer,
@@ -767,9 +747,10 @@ public sealed class LuxusParceirosIntegrationService
                 var cleanSubject = StripWorkflowPrefix(ReadString(root, "assunto"));
                 var prefix = workflowStage switch
                 {
-                    "TASK_APPROVED_REVIEW_PENDING" => "Contrato aprovado - aguardando admin",
-                    "TASK_REJECTED_REVIEW_PENDING" => "Contrato recusado - aguardando admin",
-                    _ => "Contrato em branco enviado",
+                    "TASK_APPROVED_REVIEW_PENDING" => "Contrato aprovado no Luxus Task",
+                    "TASK_REJECTED_REVIEW_PENDING" => "Contrato recusado no Luxus Task",
+                    "BLANK_CONTRACT_READY_FOR_ADMIN" => "Contrato em branco recebido",
+                    _ => "Contrato em branco recebido",
                 };
                 await _supabase.UpdateSingleAsync(
                     "Demanda",
@@ -809,6 +790,33 @@ public sealed class LuxusParceirosIntegrationService
             },
             updatedAt = ReadString(root, "updatedAt"),
         };
+    }
+
+    private async Task<byte[]> DownloadPartnerDocumentBufferAsync(
+        string saleId,
+        string documentId,
+        CancellationToken cancellationToken)
+    {
+        var httpClient = _httpClientFactory.CreateClient();
+        using var message = new HttpRequestMessage(HttpMethod.Get, BuildPartnerDocumentUrl(saleId, documentId));
+        message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
+        using var response = await httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            throw new InvalidOperationException(
+                $"Falha ao baixar documento no Luxus Parceiros (HTTP {(int)response.StatusCode}): {body}");
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var memory = new MemoryStream();
+        await stream.CopyToAsync(memory, cancellationToken);
+        var buffer = memory.ToArray();
+        if (buffer.Length == 0)
+        {
+            throw new InvalidOperationException("O documento veio vazio do Luxus Parceiros.");
+        }
+        return buffer;
     }
 
     private static string StripWorkflowPrefix(string subject) =>

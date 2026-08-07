@@ -676,6 +676,26 @@ public sealed class DemandasService
         return await FindOneAsync(userId, demandaId, cancellationToken);
     }
 
+    public Task<object> AddAnexoForIntegrationAsync(
+        string userId,
+        string demandaId,
+        byte[] buffer,
+        string originalFilename,
+        string? displayName,
+        string contentType,
+        long size,
+        CancellationToken cancellationToken) =>
+        AddAnexoAsync(
+            userId,
+            demandaId,
+            buffer,
+            originalFilename,
+            displayName,
+            contentType,
+            size,
+            cancellationToken,
+            skipVisibilityCheck: true);
+
     public async Task<object> AddAnexoAsync(
         string userId,
         string demandaId,
@@ -684,7 +704,8 @@ public sealed class DemandasService
         string? displayName,
         string contentType,
         long size,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool skipVisibilityCheck = false)
     {
         var demanda = await _supabase.QuerySingleAsync(
             $"Demanda?select=*&id=eq.{Uri.EscapeDataString(demandaId)}&limit=1",
@@ -694,7 +715,7 @@ public sealed class DemandasService
             throw new KeyNotFoundException("Demanda nao encontrada");
         }
 
-        if (!await _visibility.CanViewDemandaAsync(userId, demandaId, cancellationToken))
+        if (!skipVisibilityCheck && !await _visibility.CanViewDemandaAsync(userId, demandaId, cancellationToken))
         {
             throw new UnauthorizedAccessException("Sem permissao para ver esta demanda");
         }
