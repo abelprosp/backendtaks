@@ -694,7 +694,8 @@ public sealed class DemandasService
             contentType,
             size,
             cancellationToken,
-            skipVisibilityCheck: true);
+            skipVisibilityCheck: true,
+            forceSupabaseStorage: true);
 
     public async Task<object> AddAnexoAsync(
         string userId,
@@ -705,7 +706,8 @@ public sealed class DemandasService
         string contentType,
         long size,
         CancellationToken cancellationToken,
-        bool skipVisibilityCheck = false)
+        bool skipVisibilityCheck = false,
+        bool forceSupabaseStorage = false)
     {
         var demanda = await _supabase.QuerySingleAsync(
             $"Demanda?select=*&id=eq.{Uri.EscapeDataString(demandaId)}&limit=1",
@@ -725,7 +727,10 @@ public sealed class DemandasService
         }
 
         var legacyDemandaId = await ResolveLegacyDemandaIdAsync(demanda.Value, demandaId, cancellationToken);
-        if (_options.PreferLegacyAttachments && !string.IsNullOrWhiteSpace(legacyDemandaId) && _legacyAttachments.IsConfigured)
+        if (!forceSupabaseStorage
+            && _options.PreferLegacyAttachments
+            && !string.IsNullOrWhiteSpace(legacyDemandaId)
+            && _legacyAttachments.IsConfigured)
         {
             var safeLegacyTransportFilename = NormalizeLegacyTransportFilename(string.IsNullOrWhiteSpace(originalFilename) ? "file" : originalFilename);
             var legacy = await _legacyAttachments.UploadAsync(
@@ -761,7 +766,7 @@ public sealed class DemandasService
             return createdLegacy.Clone();
         }
 
-        if (_options.RequireLegacyAttachments)
+        if (!forceSupabaseStorage && _options.RequireLegacyAttachments)
         {
             throw new InvalidOperationException("Esta demanda ainda não possui vínculo com uma demanda do sistema antigo para armazenar anexos no legado.");
         }
