@@ -473,10 +473,15 @@ public sealed class LuxusParceirosIntegrationService
             .Select(value => value!)
             .ToList();
         var imported = 0;
+        var failed = new List<string>();
+        var skipped = 0;
         foreach (var document in request.Documents)
         {
             if (string.IsNullOrWhiteSpace(document.Id) || string.IsNullOrWhiteSpace(document.Name))
+            {
+                failed.Add("documento sem id/nome");
                 continue;
+            }
             var shortId = document.Id.Replace("-", "");
             if (shortId.Length > 8) shortId = shortId[..8];
             if (existingNames.Any(name =>
@@ -484,6 +489,7 @@ public sealed class LuxusParceirosIntegrationService
                     || string.Equals(name, document.Name, StringComparison.OrdinalIgnoreCase)
                     || string.Equals(name, $"{document.Type}-{document.Name}", StringComparison.OrdinalIgnoreCase)))
             {
+                skipped++;
                 continue;
             }
             try
@@ -514,6 +520,7 @@ public sealed class LuxusParceirosIntegrationService
             }
             catch (Exception error)
             {
+                failed.Add($"{document.Type}:{document.Name} ({error.Message})");
                 Console.Error.WriteLine(
                     $"[luxus-parceiros] Falha ao reimportar documento {document.Id}/{document.Name}: {error.Message}");
             }
@@ -531,7 +538,13 @@ public sealed class LuxusParceirosIntegrationService
             await NotifyIfIntegratedAsync(demandaId, demand, cancellationToken);
         }
 
-        return new { imported, total = request.Documents.Count };
+        if (failed.Count > 0 && imported == 0 && skipped == 0)
+        {
+            throw new InvalidOperationException(
+                $"Nenhum anexo importado. {string.Join("; ", failed)}");
+        }
+
+        return new { imported, skipped, failed, total = request.Documents.Count };
     }
 
     public async Task NotifyByDemandaIdAsync(string demandaId, CancellationToken cancellationToken)

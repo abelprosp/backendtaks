@@ -136,6 +136,7 @@ public sealed class LuxusParceirosIntegrationController : ControllerBase
     }
 
     [HttpPost("demandas/{externalRequestId}/anexos")]
+    [RequestSizeLimit(52_428_800)]
     public async Task<IActionResult> ImportDocuments(
         string externalRequestId,
         [FromBody] ImportLuxusParceirosDocumentsRequest request,

@@ -7,6 +7,11 @@ using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.Limits.MaxRequestBodySize = 52_428_800; // 50 MB (anexos em base64)
+});
+
 builder.Configuration.AddEnvironmentVariables();
 
 builder.Services.Configure<AppOptions>(options =>

@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
 
 namespace LuxusDemandas.Api.Models;
 
@@ -58,6 +59,8 @@ public sealed class LuxusParceirosDocumentDto
     public string Type { get; init; } = string.Empty;
     public string MimeType { get; init; } = "application/octet-stream";
     public long Size { get; init; }
+
+    [JsonPropertyName("contentBase64")]
     public string? ContentBase64 { get; init; }
 }
 
