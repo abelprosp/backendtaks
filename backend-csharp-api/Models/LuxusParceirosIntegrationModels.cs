@@ -58,6 +58,7 @@ public sealed class LuxusParceirosDocumentDto
     public string Type { get; init; } = string.Empty;
     public string MimeType { get; init; } = "application/octet-stream";
     public long Size { get; init; }
+    public string? ContentBase64 { get; init; }
 }
 
 public sealed record LuxusParceirosClientDto(

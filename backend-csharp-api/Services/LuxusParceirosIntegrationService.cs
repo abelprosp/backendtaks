@@ -204,9 +204,9 @@ public sealed class LuxusParceirosIntegrationService
         {
             try
             {
-                var buffer = await DownloadPartnerDocumentBufferAsync(
+                var buffer = await ResolvePartnerDocumentBufferAsync(
                     request.RequestId,
-                    document.Id,
+                    document,
                     cancellationToken);
                 var uniqueFilename = BuildUniqueAttachmentFilename(document.Name, document.Type, document.Id, usedFilenames);
                 var imported = await _demandas.AddAnexoForIntegrationAsync(
@@ -214,7 +214,7 @@ public sealed class LuxusParceirosIntegrationService
                     demandaId,
                     buffer,
                     uniqueFilename,
-                    $"{document.Type} — {document.Name}",
+                    document.Name,
                     string.IsNullOrWhiteSpace(document.MimeType)
                         ? "application/octet-stream"
                         : document.MimeType,
@@ -241,9 +241,9 @@ public sealed class LuxusParceirosIntegrationService
                 if (usedFilenames.Contains(document.Name)) continue;
                 try
                 {
-                    var buffer = await DownloadPartnerDocumentBufferAsync(
+                    var buffer = await ResolvePartnerDocumentBufferAsync(
                         request.RequestId,
-                        document.Id,
+                        document,
                         cancellationToken);
                     var uniqueFilename = BuildUniqueAttachmentFilename(
                         document.Name,
@@ -255,7 +255,7 @@ public sealed class LuxusParceirosIntegrationService
                         demandaId,
                         buffer,
                         uniqueFilename,
-                        $"{document.Type} — {document.Name}",
+                        document.Name,
                         string.IsNullOrWhiteSpace(document.MimeType)
                             ? "application/octet-stream"
                             : document.MimeType,
@@ -488,7 +488,7 @@ public sealed class LuxusParceirosIntegrationService
             }
             try
             {
-                var buffer = await DownloadPartnerDocumentBufferAsync(externalRequestId, document.Id, cancellationToken);
+                var buffer = await ResolvePartnerDocumentBufferAsync(externalRequestId, document, cancellationToken);
                 var mimeType = string.IsNullOrWhiteSpace(document.MimeType)
                     ? "application/octet-stream"
                     : document.MimeType;
@@ -502,7 +502,7 @@ public sealed class LuxusParceirosIntegrationService
                     demandaId,
                     buffer,
                     uniqueFilename,
-                    $"{document.Type} — {document.Name}",
+                    document.Name,
                     mimeType,
                     buffer.LongLength,
                     cancellationToken);
@@ -881,6 +881,28 @@ public sealed class LuxusParceirosIntegrationService
             if (!usedFilenames.Contains(candidate)) return candidate;
         }
         return $"{safeType}-{Guid.NewGuid():N}-{safeName}";
+    }
+
+    private async Task<byte[]> ResolvePartnerDocumentBufferAsync(
+        string saleId,
+        LuxusParceirosDocumentDto document,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(document.ContentBase64))
+        {
+            try
+            {
+                var buffer = Convert.FromBase64String(document.ContentBase64);
+                if (buffer.Length > 0) return buffer;
+            }
+            catch (FormatException error)
+            {
+                Console.Error.WriteLine(
+                    $"[luxus-parceiros] ContentBase64 inválido para {document.Id}: {error.Message}");
+            }
+        }
+
+        return await DownloadPartnerDocumentBufferAsync(saleId, document.Id, cancellationToken);
     }
 
     private async Task<byte[]> DownloadPartnerDocumentBufferAsync(
