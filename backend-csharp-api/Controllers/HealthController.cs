@@ -55,7 +55,8 @@ public sealed class HealthController : ControllerBase
         {
             _logger.LogError(
                 error,
-                "Healthcheck do Supabase falhou. TraceId: {TraceId}",
+                "Healthcheck do Supabase falhou. Motivo: {ErrorMessage}. TraceId: {TraceId}",
+                error.Message,
                 HttpContext.TraceIdentifier);
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new
             {

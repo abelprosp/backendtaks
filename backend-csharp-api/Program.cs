@@ -127,9 +127,10 @@ app.Use(async (context, next) =>
             .CreateLogger("UnhandledRequest");
         logger.LogError(
             error,
-            "Erro não tratado em {Method} {Path}. TraceId: {TraceId}",
+            "Erro não tratado em {Method} {Path}. Motivo: {ErrorMessage}. TraceId: {TraceId}",
             context.Request.Method,
             context.Request.Path,
+            error.Message,
             context.TraceIdentifier);
 
         if (context.Response.HasStarted)
