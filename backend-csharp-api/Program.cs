@@ -114,6 +114,38 @@ var app = builder.Build();
 app.MapGet("/", () => Results.Redirect("/health"));
 
 app.UseCors("frontend");
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (Exception error)
+    {
+        var logger = context.RequestServices
+            .GetRequiredService<ILoggerFactory>()
+            .CreateLogger("UnhandledRequest");
+        logger.LogError(
+            error,
+            "Erro não tratado em {Method} {Path}. TraceId: {TraceId}",
+            context.Request.Method,
+            context.Request.Path,
+            context.TraceIdentifier);
+
+        if (context.Response.HasStarted)
+        {
+            throw;
+        }
+
+        context.Response.Clear();
+        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+        await context.Response.WriteAsJsonAsync(new
+        {
+            message = $"Falha interna no backend Task. Código: {context.TraceIdentifier}",
+            traceId = context.TraceIdentifier,
+        });
+    }
+});
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
