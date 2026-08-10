@@ -5,18 +5,24 @@ namespace LuxusDemandas.Api.Support;
 public static class JsonElementExtensions
 {
     public static string GetStringOrEmpty(this JsonElement row, string propertyName) =>
-        row.TryGetProperty(propertyName, out var property) && property.ValueKind != JsonValueKind.Null
+        row.ValueKind == JsonValueKind.Object
+        && row.TryGetProperty(propertyName, out var property)
+        && property.ValueKind != JsonValueKind.Null
             ? property.GetString() ?? string.Empty
             : string.Empty;
 
     public static string? GetNullableString(this JsonElement row, string propertyName) =>
-        row.TryGetProperty(propertyName, out var property) && property.ValueKind != JsonValueKind.Null
+        row.ValueKind == JsonValueKind.Object
+        && row.TryGetProperty(propertyName, out var property)
+        && property.ValueKind != JsonValueKind.Null
             ? property.GetString()
             : null;
 
     public static bool GetBooleanOrDefault(this JsonElement row, string propertyName, bool defaultValue = false)
     {
-        if (!row.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
+        if (row.ValueKind != JsonValueKind.Object
+            || !row.TryGetProperty(propertyName, out var property)
+            || property.ValueKind == JsonValueKind.Null)
         {
             return defaultValue;
         }
@@ -32,7 +38,9 @@ public static class JsonElementExtensions
 
     public static int? GetNullableInt32(this JsonElement row, string propertyName)
     {
-        if (!row.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
+        if (row.ValueKind != JsonValueKind.Object
+            || !row.TryGetProperty(propertyName, out var property)
+            || property.ValueKind == JsonValueKind.Null)
         {
             return null;
         }
@@ -46,11 +54,16 @@ public static class JsonElementExtensions
     }
 
     public static JsonElement? GetOptionalProperty(this JsonElement row, string propertyName) =>
-        row.TryGetProperty(propertyName, out var property) ? property : null;
+        row.ValueKind == JsonValueKind.Object
+        && row.TryGetProperty(propertyName, out var property)
+            ? property
+            : null;
 
     public static IReadOnlyList<JsonElement> GetArrayOrEmpty(this JsonElement row, string propertyName)
     {
-        if (!row.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.Array)
+        if (row.ValueKind != JsonValueKind.Object
+            || !row.TryGetProperty(propertyName, out var property)
+            || property.ValueKind != JsonValueKind.Array)
         {
             return Array.Empty<JsonElement>();
         }

@@ -726,7 +726,9 @@ public sealed class DemandasService
             throw new InvalidOperationException("Arquivo inválido.");
         }
 
-        var legacyDemandaId = await ResolveLegacyDemandaIdAsync(demanda.Value, demandaId, cancellationToken);
+        var legacyDemandaId = forceSupabaseStorage
+            ? null
+            : await ResolveLegacyDemandaIdAsync(demanda.Value, demandaId, cancellationToken);
         if (!forceSupabaseStorage
             && _options.PreferLegacyAttachments
             && !string.IsNullOrWhiteSpace(legacyDemandaId)
