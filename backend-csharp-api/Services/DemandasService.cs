@@ -790,11 +790,12 @@ public sealed class DemandasService
             demandaId,
             userId,
             "anexo_adicionado",
-            $"Anexo adicionado: {created.GetStringOrEmpty("filename")}.",
+            $"Anexo adicionado: {(string.IsNullOrWhiteSpace(displayName) ? created.GetStringOrEmpty("filename") : displayName)}.",
             new
             {
                 anexoId = created.GetNullableString("id"),
                 filename = created.GetStringOrEmpty("filename"),
+                displayName = string.IsNullOrWhiteSpace(displayName) ? created.GetStringOrEmpty("filename") : displayName,
             },
             cancellationToken);
 

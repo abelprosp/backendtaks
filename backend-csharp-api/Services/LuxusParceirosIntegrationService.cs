@@ -139,8 +139,9 @@ public sealed class LuxusParceirosIntegrationService
         }
 
         var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
-        var documentLinks = request.Documents.Select(document =>
-            $"Documento {document.Type}: {document.Name} — {BuildPartnerDocumentUrl(request.RequestId, document.Id)}");
+        var documentNames = request.Documents
+            .Select(document => $"{document.Type}: {document.Name}")
+            .ToArray();
         var origin = new[]
         {
             $"Origem: Luxus Parceiros ({request.LocalProtocol})",
@@ -149,7 +150,10 @@ public sealed class LuxusParceirosIntegrationService
             $"Solicitante: {request.RequesterName} <{request.RequesterEmail}>",
             string.Empty,
             request.Description.Trim(),
-        }.Concat(documentLinks);
+            documentNames.Length > 0
+                ? $"Documentos recebidos no Parceiros: {string.Join("; ", documentNames)}"
+                : null,
+        };
         var created = await _demandas.CreateAsync(
             technicalUserId,
             new CreateDemandaRequest
@@ -296,7 +300,15 @@ public sealed class LuxusParceirosIntegrationService
         UpdateLuxusParceirosSaleStageRequest request,
         CancellationToken cancellationToken)
     {
-        var allowed = new[] { "AWAITING_PARTNER_SIGNATURE", "TASK_VALIDATING_SIGNED_CONTRACT" };
+        var allowed = new[]
+        {
+            "AWAITING_PARTNER_SIGNATURE",
+            "TASK_VALIDATING_SIGNED_CONTRACT",
+            "TASK_PROCESSING",
+            "BLANK_CONTRACT_READY_FOR_ADMIN",
+            "SIGNED_CONTRACT_READY_FOR_ADMIN",
+            "CHANGES_REQUESTED",
+        };
         if (!allowed.Contains(request.Stage, StringComparer.OrdinalIgnoreCase))
             throw new InvalidOperationException("Etapa de venda inválida para esta operação.");
 
@@ -348,9 +360,16 @@ public sealed class LuxusParceirosIntegrationService
             }, cancellationToken);
         }
 
-        var label = string.Equals(request.Stage, "AWAITING_PARTNER_SIGNATURE", StringComparison.OrdinalIgnoreCase)
-            ? "Aguardando assinatura do parceiro"
-            : "Contrato assinado recebido — aguardando validação final";
+        var label = request.Stage.ToUpperInvariant() switch
+        {
+            "AWAITING_PARTNER_SIGNATURE" => "Aguardando assinatura do parceiro",
+            "TASK_VALIDATING_SIGNED_CONTRACT" => "Contrato assinado recebido — aguardando validação final",
+            "TASK_PROCESSING" => "Aguardando Luxus Task",
+            "BLANK_CONTRACT_READY_FOR_ADMIN" => "Contrato em branco recebido",
+            "SIGNED_CONTRACT_READY_FOR_ADMIN" => "Contrato assinado pelo parceiro",
+            "CHANGES_REQUESTED" => "Correção do contrato solicitada",
+            _ => request.Stage,
+        };
         await _demandas.AddObservacaoAsync(
             technicalUserId,
             demandaId,
@@ -363,12 +382,7 @@ public sealed class LuxusParceirosIntegrationService
             await _supabase.UpdateSingleAsync(
                 "Demanda",
                 $"id=eq.{Uri.EscapeDataString(demandaId)}",
-                new
-                {
-                    assunto = string.Equals(request.Stage, "AWAITING_PARTNER_SIGNATURE", StringComparison.OrdinalIgnoreCase)
-                        ? $"[Aguardando assinatura do parceiro] {cleanSubject}"
-                        : $"[Contrato assinado enviado para conferência] {cleanSubject}",
-                },
+                new { assunto = $"[{label}] {cleanSubject}" },
                 cancellationToken);
         }
         await _supabase.UpdateSingleAsync(
@@ -574,7 +588,11 @@ public sealed class LuxusParceirosIntegrationService
         using var demandJson = JsonDocument.Parse(JsonSerializer.Serialize(demand));
         var root = demandJson.RootElement;
         var instructions = ReadString(root, "observacoesGerais");
-        if (string.IsNullOrWhiteSpace(instructions))
+        var observationTexts = ReadArray(root, "observacoes")
+            .Select(item => ReadString(item, "texto"))
+            .Where(value => !string.IsNullOrWhiteSpace(value));
+        var searchableText = string.Join('\n', new[] { instructions }.Concat(observationTexts).Where(value => !string.IsNullOrWhiteSpace(value)));
+        if (string.IsNullOrWhiteSpace(searchableText))
         {
             return false;
         }
@@ -590,19 +608,22 @@ public sealed class LuxusParceirosIntegrationService
             .ToList();
         var importedAny = false;
         var documentPattern = new Regex(
-            @"^Documento\s+(?<type>[^:]+):\s*(?<name>.+?)\s+[—-]\s+https?://\S+/documents/(?<id>[0-9a-f-]+)\s*$",
+            @"Documento\s+(?<type>[^:]+):\s*(?<name>.+?)\s+[—-]\s+https?://\S+/documents/(?<id>[0-9a-f-]+)",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        var fallbackPattern = new Regex(
+            @"documento\s+(?<name>.+?)\.\s+Ele continua disponível em\s+(?<url>https?://\S+/documents/(?<id>[0-9a-f-]+))",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        var seenDocumentIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var line in instructions.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        foreach (Match match in documentPattern.Matches(searchableText).Cast<Match>()
+            .Concat(fallbackPattern.Matches(searchableText).Cast<Match>()))
         {
-            var match = documentPattern.Match(line);
-            if (!match.Success) continue;
-
             var documentId = match.Groups["id"].Value;
             var documentName = match.Groups["name"].Value.Trim();
-            var documentType = match.Groups["type"].Value.Trim();
+            var documentType = match.Groups["type"].Success ? match.Groups["type"].Value.Trim() : "DOCUMENTO";
             if (string.IsNullOrWhiteSpace(documentId)
                 || string.IsNullOrWhiteSpace(documentName)
+                || !seenDocumentIds.Add(documentId)
                 || existingNames.Contains(documentName))
             {
                 continue;
@@ -632,7 +653,7 @@ public sealed class LuxusParceirosIntegrationService
             }
             catch
             {
-                // A consulta permanece idempotente e tentará novamente na próxima sincronização.
+                // Mantém tentativa silenciosa; a UI já mostra o link legado se ainda existir.
             }
         }
 
@@ -710,7 +731,9 @@ public sealed class LuxusParceirosIntegrationService
             .Select(item => new
             {
                 id = ReadString(item, "id"),
-                name = ReadString(item, "filename"),
+                name = string.IsNullOrWhiteSpace(ReadString(item, "displayName"))
+                    ? ReadString(item, "filename")
+                    : ReadString(item, "displayName"),
                 mimeType = ReadString(item, "mime_type"),
                 size = ReadLong(item, "size"),
                 createdAt = ReadString(item, "created_at"),
@@ -728,13 +751,8 @@ public sealed class LuxusParceirosIntegrationService
             var next = string.Equals(taskStatus, "cancelado", StringComparison.OrdinalIgnoreCase)
                 ? "TASK_REJECTED_REVIEW_PENDING"
                 : validatingSignedContract
-                ? string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase)
                     ? "TASK_APPROVED_REVIEW_PENDING"
-                    : "TASK_REJECTED_REVIEW_PENDING"
-                : string.Equals(workflowStage, "TASK_PROCESSING", StringComparison.OrdinalIgnoreCase)
-                  && string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase)
-                  && workflowAttachments.Length > 0
-                    ? "BLANK_CONTRACT_READY_FOR_ADMIN"
                     : workflowStage;
             if (!string.Equals(next, workflowStage, StringComparison.OrdinalIgnoreCase))
             {
@@ -800,7 +818,12 @@ public sealed class LuxusParceirosIntegrationService
         var httpClient = _httpClientFactory.CreateClient();
         using var message = new HttpRequestMessage(HttpMethod.Get, BuildPartnerDocumentUrl(saleId, documentId));
         message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
-        using var response = await httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        // ResponseContentRead + ReadAsByteArrayAsync evita InvalidOperationException
+        // ("Operation is not valid due to the current state of the object") no stream.
+        using var response = await httpClient.SendAsync(
+            message,
+            HttpCompletionOption.ResponseContentRead,
+            cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -808,10 +831,7 @@ public sealed class LuxusParceirosIntegrationService
                 $"Falha ao baixar documento no Luxus Parceiros (HTTP {(int)response.StatusCode}): {body}");
         }
 
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        using var memory = new MemoryStream();
-        await stream.CopyToAsync(memory, cancellationToken);
-        var buffer = memory.ToArray();
+        var buffer = await response.Content.ReadAsByteArrayAsync(cancellationToken);
         if (buffer.Length == 0)
         {
             throw new InvalidOperationException("O documento veio vazio do Luxus Parceiros.");
