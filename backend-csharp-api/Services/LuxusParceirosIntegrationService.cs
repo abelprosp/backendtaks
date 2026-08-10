@@ -371,7 +371,7 @@ public sealed class LuxusParceirosIntegrationService
                 demandaId,
                 buffer,
                 request.DocumentName,
-                $"CONTRATO ASSINADO — {request.DocumentName}",
+                request.DocumentName,
                 request.DocumentMimeType ?? "application/pdf",
                 buffer.LongLength,
                 cancellationToken);
@@ -625,17 +625,8 @@ public sealed class LuxusParceirosIntegrationService
             mapping.GetStringOrEmpty("demanda_id"),
             cancellationToken);
 
-        if (await ImportMissingPartnerDocumentsAsync(mapping, demand, technicalUserId, cancellationToken))
-        {
-            mapping = await FindMappingByExternalIdAsync(
-                mapping.GetStringOrEmpty("external_request_id"),
-                cancellationToken) ?? mapping;
-            demand = await _demandas.FindOneAsync(
-                technicalUserId,
-                mapping.GetStringOrEmpty("demanda_id"),
-                cancellationToken);
-        }
-
+        // Não reimporta a partir de texto de observações (isso recriava lixo e anexos errados).
+        // A importação oficial é via POST /anexos com ContentBase64 / download da API.
         return await BuildCallbackPayloadAsync(mapping, demand, cancellationToken);
     }
 
@@ -931,10 +922,7 @@ public sealed class LuxusParceirosIntegrationService
                 var httpClient = _httpClientFactory.CreateClient();
                 using var message = new HttpRequestMessage(HttpMethod.Get, BuildPartnerDocumentUrl(saleId, documentId));
                 message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
-                using var response = await httpClient.SendAsync(
-                    message,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    cancellationToken);
+                using var response = await httpClient.SendAsync(message, cancellationToken);
                 if (!response.IsSuccessStatusCode)
                 {
                     var body = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -942,10 +930,7 @@ public sealed class LuxusParceirosIntegrationService
                         $"Falha ao baixar documento no Luxus Parceiros (HTTP {(int)response.StatusCode}): {body}");
                 }
 
-                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-                using var memory = new MemoryStream();
-                await stream.CopyToAsync(memory, cancellationToken);
-                var buffer = memory.ToArray();
+                var buffer = await response.Content.ReadAsByteArrayAsync(cancellationToken);
                 if (buffer.Length == 0)
                 {
                     throw new InvalidOperationException("O documento veio vazio do Luxus Parceiros.");
