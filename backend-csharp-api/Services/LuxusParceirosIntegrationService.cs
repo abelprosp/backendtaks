@@ -139,9 +139,6 @@ public sealed class LuxusParceirosIntegrationService
         }
 
         var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
-        var documentNames = request.Documents
-            .Select(document => $"{document.Type}: {document.Name}")
-            .ToArray();
         var origin = new[]
         {
             $"Origem: Luxus Parceiros ({request.LocalProtocol})",
@@ -150,9 +147,6 @@ public sealed class LuxusParceirosIntegrationService
             $"Solicitante: {request.RequesterName} <{request.RequesterEmail}>",
             string.Empty,
             request.Description.Trim(),
-            documentNames.Length > 0
-                ? $"Documentos recebidos no Parceiros: {string.Join("; ", documentNames)}"
-                : null,
         };
         var created = await _demandas.CreateAsync(
             technicalUserId,
@@ -197,6 +191,7 @@ public sealed class LuxusParceirosIntegrationService
             cancellationToken);
 
         var sourceAttachmentIds = new List<string>();
+        var usedFilenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var document in request.Documents)
         {
             try
@@ -205,11 +200,12 @@ public sealed class LuxusParceirosIntegrationService
                     request.RequestId,
                     document.Id,
                     cancellationToken);
+                var uniqueFilename = BuildUniqueAttachmentFilename(document.Name, document.Type, document.Id, usedFilenames);
                 var imported = await _demandas.AddAnexoForIntegrationAsync(
                     technicalUserId,
                     demandaId,
                     buffer,
-                    document.Name,
+                    uniqueFilename,
                     $"{document.Type} — {document.Name}",
                     string.IsNullOrWhiteSpace(document.MimeType)
                         ? "application/octet-stream"
@@ -219,16 +215,14 @@ public sealed class LuxusParceirosIntegrationService
                 using var importedJson = JsonDocument.Parse(JsonSerializer.Serialize(imported));
                 var importedId = ReadString(importedJson.RootElement, "id");
                 if (!string.IsNullOrWhiteSpace(importedId)) sourceAttachmentIds.Add(importedId);
+                usedFilenames.Add(uniqueFilename);
             }
             catch (Exception error)
             {
-                await _demandas.AddObservacaoAsync(
-                    technicalUserId,
-                    demandaId,
-                    $"Não foi possível copiar automaticamente o documento {document.Name}. "
-                    + $"Ele continua disponível em {BuildPartnerDocumentUrl(request.RequestId, document.Id)}. "
-                    + $"Motivo: {error.Message}",
-                    cancellationToken);
+                // Não grava em observações/instruções: esses campos são para a equipe.
+                // A reimportação tenta de novo ao abrir a demanda / reenviar sync.
+                Console.Error.WriteLine(
+                    $"[luxus-parceiros] Falha ao importar documento {document.Id}/{document.Name}: {error.Message}");
             }
         }
 
@@ -435,18 +429,31 @@ public sealed class LuxusParceirosIntegrationService
         {
             if (string.IsNullOrWhiteSpace(document.Id) || string.IsNullOrWhiteSpace(document.Name))
                 continue;
-            if (existingNames.Contains(document.Name)) continue;
+            var shortId = document.Id.Replace("-", "");
+            if (shortId.Length > 8) shortId = shortId[..8];
+            if (existingNames.Any(name =>
+                    name.Contains(shortId, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(name, document.Name, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(name, $"{document.Type}-{document.Name}", StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
             try
             {
                 var buffer = await DownloadPartnerDocumentBufferAsync(externalRequestId, document.Id, cancellationToken);
                 var mimeType = string.IsNullOrWhiteSpace(document.MimeType)
                     ? "application/octet-stream"
                     : document.MimeType;
+                var uniqueFilename = BuildUniqueAttachmentFilename(
+                    document.Name,
+                    document.Type,
+                    document.Id,
+                    existingNames);
                 var created = await _demandas.AddAnexoForIntegrationAsync(
                     technicalUserId,
                     demandaId,
                     buffer,
-                    document.Name,
+                    uniqueFilename,
                     $"{document.Type} — {document.Name}",
                     mimeType,
                     buffer.LongLength,
@@ -454,16 +461,13 @@ public sealed class LuxusParceirosIntegrationService
                 using var createdJson = JsonDocument.Parse(JsonSerializer.Serialize(created));
                 var createdId = ReadString(createdJson.RootElement, "id");
                 if (!string.IsNullOrWhiteSpace(createdId)) sourceAttachmentIds.Add(createdId);
-                existingNames.Add(document.Name);
+                existingNames.Add(uniqueFilename);
                 imported++;
             }
             catch (Exception error)
             {
-                await _demandas.AddObservacaoAsync(
-                    technicalUserId,
-                    demandaId,
-                    $"Não foi possível copiar automaticamente o documento {document.Name}. Motivo: {error.Message}",
-                    cancellationToken);
+                Console.Error.WriteLine(
+                    $"[luxus-parceiros] Falha ao reimportar documento {document.Id}/{document.Name}: {error.Message}");
             }
         }
 
@@ -677,6 +681,9 @@ public sealed class LuxusParceirosIntegrationService
         var observations = ReadArray(root, "observacoes")
             .Select(item => ReadString(item, "texto"))
             .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Where(value =>
+                value.IndexOf("Não foi possível copiar automaticamente", StringComparison.OrdinalIgnoreCase) < 0
+                && value.IndexOf("continua disponível em", StringComparison.OrdinalIgnoreCase) < 0)
             .ToArray();
         var taskResponses = observations
             .Where(value => !value.StartsWith(
@@ -786,7 +793,6 @@ public sealed class LuxusParceirosIntegrationService
         {
             externalRequestId = mapping.GetStringOrEmpty("external_request_id"),
             demandId = ReadString(root, "id"),
-            id = ReadString(root, "id"),
             protocol = ReadString(root, "protocolo"),
             status = taskStatus,
             workflowStage,
@@ -800,14 +806,33 @@ public sealed class LuxusParceirosIntegrationService
             editorName,
             editorActivity,
             editorLastSeenAt,
-            responsible = new
-            {
-                id = ReadString(user, "id"),
-                name = ReadString(user, "name"),
-                email = ReadString(user, "email"),
-            },
             updatedAt = ReadString(root, "updatedAt"),
         };
+    }
+
+    private static string BuildUniqueAttachmentFilename(
+        string name,
+        string type,
+        string documentId,
+        ISet<string> usedFilenames)
+    {
+        var safeName = string.IsNullOrWhiteSpace(name) ? "arquivo" : name.Trim();
+        var safeType = string.IsNullOrWhiteSpace(type)
+            ? "DOC"
+            : type.Trim().Replace(' ', '_');
+        var shortId = (documentId ?? string.Empty).Replace("-", "");
+        if (shortId.Length > 8) shortId = shortId[..8];
+        var candidates = new[]
+        {
+            $"{safeType}-{safeName}",
+            $"{safeType}-{shortId}-{safeName}",
+            $"{shortId}-{safeName}",
+        };
+        foreach (var candidate in candidates)
+        {
+            if (!usedFilenames.Contains(candidate)) return candidate;
+        }
+        return $"{safeType}-{Guid.NewGuid():N}-{safeName}";
     }
 
     private async Task<byte[]> DownloadPartnerDocumentBufferAsync(
@@ -815,28 +840,47 @@ public sealed class LuxusParceirosIntegrationService
         string documentId,
         CancellationToken cancellationToken)
     {
-        var httpClient = _httpClientFactory.CreateClient();
-        using var message = new HttpRequestMessage(HttpMethod.Get, BuildPartnerDocumentUrl(saleId, documentId));
-        message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
-        // ResponseContentRead + ReadAsByteArrayAsync evita InvalidOperationException
-        // ("Operation is not valid due to the current state of the object") no stream.
-        using var response = await httpClient.SendAsync(
-            message,
-            HttpCompletionOption.ResponseContentRead,
-            cancellationToken);
-        if (!response.IsSuccessStatusCode)
+        Exception? lastError = null;
+        for (var attempt = 1; attempt <= 3; attempt++)
         {
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
-            throw new InvalidOperationException(
-                $"Falha ao baixar documento no Luxus Parceiros (HTTP {(int)response.StatusCode}): {body}");
+            try
+            {
+                var httpClient = _httpClientFactory.CreateClient();
+                using var message = new HttpRequestMessage(HttpMethod.Get, BuildPartnerDocumentUrl(saleId, documentId));
+                message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
+                using var response = await httpClient.SendAsync(
+                    message,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                {
+                    var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                    throw new InvalidOperationException(
+                        $"Falha ao baixar documento no Luxus Parceiros (HTTP {(int)response.StatusCode}): {body}");
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                using var memory = new MemoryStream();
+                await stream.CopyToAsync(memory, cancellationToken);
+                var buffer = memory.ToArray();
+                if (buffer.Length == 0)
+                {
+                    throw new InvalidOperationException("O documento veio vazio do Luxus Parceiros.");
+                }
+                return buffer;
+            }
+            catch (Exception error) when (attempt < 3)
+            {
+                lastError = error;
+                await Task.Delay(250 * attempt, cancellationToken);
+            }
+            catch (Exception error)
+            {
+                lastError = error;
+            }
         }
 
-        var buffer = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-        if (buffer.Length == 0)
-        {
-            throw new InvalidOperationException("O documento veio vazio do Luxus Parceiros.");
-        }
-        return buffer;
+        throw lastError ?? new InvalidOperationException("Falha ao baixar documento no Luxus Parceiros.");
     }
 
     private static string StripWorkflowPrefix(string subject) =>
