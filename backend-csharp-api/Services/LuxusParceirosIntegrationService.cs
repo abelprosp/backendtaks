@@ -321,6 +321,50 @@ public sealed class LuxusParceirosIntegrationService
         return await BuildResponseAsync(mapping, cancellationToken);
     }
 
+    public async Task<int> RecoverMissingSaleAttachmentsAsync(CancellationToken cancellationToken)
+    {
+        var mappings = await _supabase.QueryRowsAsync(
+            "luxus_parceiros_demanda?select=external_request_id,source_attachment_ids,entity_type&entity_type=eq.sale&limit=500",
+            cancellationToken);
+        var recovered = 0;
+
+        foreach (var mapping in mappings)
+        {
+            if (mapping.GetArrayOrEmpty("source_attachment_ids").Count > 0)
+            {
+                continue;
+            }
+
+            var externalRequestId = mapping.GetStringOrEmpty("external_request_id");
+            if (string.IsNullOrWhiteSpace(externalRequestId))
+            {
+                continue;
+            }
+
+            try
+            {
+                var listedDocuments = await ListPartnerDocumentsAsync(externalRequestId, cancellationToken);
+                if (listedDocuments.Count == 0)
+                {
+                    continue;
+                }
+
+                await ImportPartnerDocumentsAsync(
+                    externalRequestId,
+                    new ImportLuxusParceirosDocumentsRequest { Documents = listedDocuments },
+                    cancellationToken);
+                recovered++;
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine(
+                    $"[luxus-parceiros] Recuperação em segundo plano falhou para {externalRequestId}: {error.Message}");
+            }
+        }
+
+        return recovered;
+    }
+
     public async Task<object> AddCommentAsync(
         string externalRequestId,
         AddLuxusParceirosCommentRequest request,

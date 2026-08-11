@@ -61,6 +61,7 @@ builder.Services.AddScoped<DemandaVisibilityService>();
 builder.Services.AddSingleton<LegacyAttachmentService>();
 builder.Services.AddScoped<DemandasService>();
 builder.Services.AddScoped<LuxusParceirosIntegrationService>();
+builder.Services.AddHostedService<LuxusParceirosAttachmentRecoveryWorker>();
 builder.Services.AddScoped<MessageReviewService>();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
