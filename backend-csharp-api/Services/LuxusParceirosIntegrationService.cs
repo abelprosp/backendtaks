@@ -619,6 +619,33 @@ public sealed class LuxusParceirosIntegrationService
 
     private async Task<object> BuildResponseAsync(JsonElement mapping, CancellationToken cancellationToken)
     {
+        var isSaleWorkflow = string.Equals(
+            mapping.GetNullableString("entity_type"),
+            "sale",
+            StringComparison.OrdinalIgnoreCase);
+        if (isSaleWorkflow && mapping.GetArrayOrEmpty("source_attachment_ids").Count == 0)
+        {
+            var externalRequestId = mapping.GetStringOrEmpty("external_request_id");
+            var listedDocuments = await ListPartnerDocumentsAsync(externalRequestId, cancellationToken);
+            if (listedDocuments.Count > 0)
+            {
+                try
+                {
+                    await ImportPartnerDocumentsAsync(
+                        externalRequestId,
+                        new ImportLuxusParceirosDocumentsRequest { Documents = listedDocuments },
+                        cancellationToken);
+                    mapping = await FindMappingByExternalIdAsync(externalRequestId, cancellationToken)
+                              ?? mapping;
+                }
+                catch (Exception error)
+                {
+                    Console.Error.WriteLine(
+                        $"[luxus-parceiros] Falha na recuperação automática dos anexos da venda {externalRequestId}: {error.Message}");
+                }
+            }
+        }
+
         var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
         var demand = await _demandas.FindOneAsync(
             technicalUserId,
