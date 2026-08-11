@@ -394,6 +394,7 @@ public sealed class LuxusParceirosIntegrationService
             "BLANK_CONTRACT_READY_FOR_ADMIN",
             "SIGNED_CONTRACT_READY_FOR_ADMIN",
             "CHANGES_REQUESTED",
+            "COMPLETED",
         };
         if (!allowed.Contains(request.Stage, StringComparer.OrdinalIgnoreCase))
             throw new InvalidOperationException("Etapa de venda inválida para esta operação.");
@@ -404,6 +405,31 @@ public sealed class LuxusParceirosIntegrationService
             throw new InvalidOperationException("A demanda informada não pertence ao fluxo de vendas.");
         var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
         var demandaId = mapping.GetStringOrEmpty("demanda_id");
+
+        if (string.Equals(request.Stage, "COMPLETED", StringComparison.OrdinalIgnoreCase))
+        {
+            var currentCompleted = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
+            using var currentCompletedJson = JsonDocument.Parse(JsonSerializer.Serialize(currentCompleted));
+            var completedSubject = StripWorkflowPrefix(ReadString(currentCompletedJson.RootElement, "assunto"));
+            await _demandas.UpdateAsync(technicalUserId, demandaId, new UpdateDemandaRequest
+            {
+                Status = "concluido",
+                Assunto = $"[Venda concluída] {completedSubject}",
+            }, cancellationToken);
+            await _supabase.UpdateSingleAsync(
+                "luxus_parceiros_demanda",
+                $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
+                new { workflow_stage = request.Stage, updated_at = DateTimeOffset.UtcNow },
+                cancellationToken);
+            await _demandas.AddObservacaoAsync(
+                technicalUserId,
+                demandaId,
+                $"[ETAPA LUXUS PARCEIROS] Venda concluída. {request.Note}".Trim(),
+                cancellationToken);
+            var refreshedCompleted = await FindMappingByExternalIdAsync(externalRequestId, cancellationToken)
+                                     ?? throw new KeyNotFoundException("Demanda integrada não encontrada.");
+            return await BuildResponseAsync(refreshedCompleted, cancellationToken);
+        }
 
         if (string.Equals(request.Stage, "TASK_VALIDATING_SIGNED_CONTRACT", StringComparison.OrdinalIgnoreCase))
         {
@@ -454,6 +480,7 @@ public sealed class LuxusParceirosIntegrationService
             "BLANK_CONTRACT_READY_FOR_ADMIN" => "Contrato em branco recebido",
             "SIGNED_CONTRACT_READY_FOR_ADMIN" => "Contrato assinado pelo parceiro",
             "CHANGES_REQUESTED" => "Correção do contrato solicitada",
+            "COMPLETED" => "Venda concluída",
             _ => request.Stage,
         };
         await _demandas.AddObservacaoAsync(
