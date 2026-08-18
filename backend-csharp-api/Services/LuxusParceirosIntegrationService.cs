@@ -393,7 +393,10 @@ public sealed class LuxusParceirosIntegrationService
             "TASK_PROCESSING",
             "BLANK_CONTRACT_READY_FOR_ADMIN",
             "SIGNED_CONTRACT_READY_FOR_ADMIN",
+            "TASK_APPROVED_REVIEW_PENDING",
+            "TASK_REJECTED_REVIEW_PENDING",
             "CHANGES_REQUESTED",
+            "PRE_REVIEW",
             "COMPLETED",
         };
         if (!allowed.Contains(request.Stage, StringComparer.OrdinalIgnoreCase))
@@ -405,6 +408,56 @@ public sealed class LuxusParceirosIntegrationService
             throw new InvalidOperationException("A demanda informada não pertence ao fluxo de vendas.");
         var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
         var demandaId = mapping.GetStringOrEmpty("demanda_id");
+        var currentStage = mapping.GetNullableString("workflow_stage") ?? string.Empty;
+        var sameStage = string.Equals(currentStage, request.Stage, StringComparison.OrdinalIgnoreCase);
+        var requestOnly = !string.IsNullOrWhiteSpace(request.TurnRequestFrom) || request.ClearTurnRequest == true;
+
+        if (string.Equals(currentStage, "COMPLETED", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(request.Stage, "COMPLETED", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Esta venda já foi concluída e não pode mais ter a vez alterada.");
+        }
+
+        if (requestOnly && sameStage && !string.Equals(request.Stage, "COMPLETED", StringComparison.OrdinalIgnoreCase))
+        {
+            var requestNote = request.ClearTurnRequest == true
+                ? $"Pedido de vez recusado. {request.Note}".Trim()
+                : $"Pedido de vez recebido de {request.TurnRequestFrom}. {request.TurnRequestReason} {request.Note}".Trim();
+            await _demandas.AddObservacaoAsync(technicalUserId, demandaId, $"[ETAPA LUXUS PARCEIROS] {requestNote}", cancellationToken);
+            if (request.ClearTurnRequest == true)
+            {
+                await _supabase.UpdateSingleAsync(
+                    "luxus_parceiros_demanda",
+                    $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
+                    new
+                    {
+                        workflow_stage = currentStage,
+                        turn_request_from = (string?)null,
+                        turn_request_reason = (string?)null,
+                        turn_request_at = (DateTimeOffset?)null,
+                        updated_at = DateTimeOffset.UtcNow,
+                    },
+                    cancellationToken);
+            }
+            else
+            {
+                await _supabase.UpdateSingleAsync(
+                    "luxus_parceiros_demanda",
+                    $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
+                    new
+                    {
+                        workflow_stage = currentStage,
+                        turn_request_from = request.TurnRequestFrom,
+                        turn_request_reason = request.TurnRequestReason,
+                        turn_request_at = DateTimeOffset.UtcNow,
+                        updated_at = DateTimeOffset.UtcNow,
+                    },
+                    cancellationToken);
+            }
+            var refreshedRequest = await FindMappingByExternalIdAsync(externalRequestId, cancellationToken)
+                                   ?? throw new KeyNotFoundException("Demanda integrada não encontrada.");
+            return await BuildResponseAsync(refreshedRequest, cancellationToken);
+        }
 
         if (string.Equals(request.Stage, "COMPLETED", StringComparison.OrdinalIgnoreCase))
         {
@@ -419,7 +472,14 @@ public sealed class LuxusParceirosIntegrationService
             await _supabase.UpdateSingleAsync(
                 "luxus_parceiros_demanda",
                 $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
-                new { workflow_stage = request.Stage, updated_at = DateTimeOffset.UtcNow },
+                new
+                {
+                    workflow_stage = request.Stage,
+                    turn_request_from = (string?)null,
+                    turn_request_reason = (string?)null,
+                    turn_request_at = (DateTimeOffset?)null,
+                    updated_at = DateTimeOffset.UtcNow,
+                },
                 cancellationToken);
             await _demandas.AddObservacaoAsync(
                 technicalUserId,
@@ -479,6 +539,8 @@ public sealed class LuxusParceirosIntegrationService
             "TASK_PROCESSING" => "Aguardando Luxus Task",
             "BLANK_CONTRACT_READY_FOR_ADMIN" => "Contrato em branco recebido",
             "SIGNED_CONTRACT_READY_FOR_ADMIN" => "Contrato assinado pelo parceiro",
+            "TASK_APPROVED_REVIEW_PENDING" => "Contrato aprovado no Luxus Task",
+            "TASK_REJECTED_REVIEW_PENDING" => "Contrato recusado no Luxus Task",
             "CHANGES_REQUESTED" => "Correção do contrato solicitada",
             "COMPLETED" => "Venda concluída",
             _ => request.Stage,
@@ -501,7 +563,14 @@ public sealed class LuxusParceirosIntegrationService
         await _supabase.UpdateSingleAsync(
             "luxus_parceiros_demanda",
             $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
-            new { workflow_stage = request.Stage, updated_at = DateTimeOffset.UtcNow },
+            new
+            {
+                workflow_stage = request.Stage,
+                turn_request_from = (string?)null,
+                turn_request_reason = (string?)null,
+                turn_request_at = (DateTimeOffset?)null,
+                updated_at = DateTimeOffset.UtcNow,
+            },
             cancellationToken);
         var refreshed = await FindMappingByExternalIdAsync(externalRequestId, cancellationToken)
                         ?? throw new KeyNotFoundException("Demanda integrada não encontrada.");

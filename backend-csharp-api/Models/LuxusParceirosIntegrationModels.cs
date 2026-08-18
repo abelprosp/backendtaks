@@ -89,6 +89,9 @@ public sealed class UpdateLuxusParceirosSaleStageRequest
     public string? DocumentName { get; init; }
     public string? DocumentMimeType { get; init; }
     public string? Note { get; init; }
+    public string? TurnRequestFrom { get; init; }
+    public string? TurnRequestReason { get; init; }
+    public bool? ClearTurnRequest { get; init; }
 }
 
 public sealed class ImportLuxusParceirosDocumentsRequest
