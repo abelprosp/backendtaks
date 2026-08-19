@@ -83,6 +83,15 @@ Fluxo recomendado:
 
 Guia detalhado em `DEPLOY.md`.
 
+## Deploy em VPS compartilhada (docker-compose.vps.yml)
+
+Quando o host já usa Nginx/Caddy na 80/443, configure portas alternativas:
+
+- `CADDY_HTTP_PORT` / `CADDY_HTTPS_PORT` — portas expostas pelo Caddy no compose
+- `CADDY_HTTP_BIND` / `CADDY_HTTPS_BIND` — bind (padrão 0.0.0.0)
+
+Exemplo: `CADDY_HTTP_PORT=8080` e proxy reverso no Nginx do host apontando para essa porta.
+
 ## Estado atual da migracao
 
 - a API C# em `backend-csharp-api/` cobre auth, users, setores, clientes, templates, demandas, observacoes, anexos, dashboard e busca por IA
