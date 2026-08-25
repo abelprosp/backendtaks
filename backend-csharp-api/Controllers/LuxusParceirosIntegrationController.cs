@@ -103,6 +103,7 @@ public sealed class LuxusParceirosIntegrationController : ControllerBase
     }
 
     [HttpPut("demandas/{externalRequestId}/detalhes")]
+    [HttpPost("demandas/{externalRequestId}/detalhes")]
     public async Task<IActionResult> UpdateDemandDetails(
         string externalRequestId,
         [FromBody] UpdateLuxusParceirosDemandDetailsRequest request,
