@@ -1045,28 +1045,48 @@ public sealed class DemandasService
     private async Task<JsonElement> InsertDemandaWithGeneratedProtocoloAsync(Dictionary<string, object?> payload, CancellationToken cancellationToken)
     {
         const int maxAttempts = 8;
+        string? lastProtocolo = null;
+        InvalidOperationException? lastDuplicate = null;
         for (var attempt = 0; attempt < maxAttempts; attempt++)
         {
-            payload["protocolo"] = await GerarProtocoloAsync(cancellationToken);
+            if (!string.IsNullOrWhiteSpace(lastProtocolo))
+            {
+                payload["protocolo"] = NextProtocoloAfter(lastProtocolo);
+            }
+            else
+            {
+                payload["protocolo"] = await GerarProtocoloAsync(cancellationToken);
+            }
+
+            lastProtocolo = Convert.ToString(payload["protocolo"]);
             try
             {
                 return await _supabase.InsertSingleAsync("Demanda", payload, cancellationToken);
             }
-            catch (InvalidOperationException ex) when (IsDuplicateProtocoloError(ex) && attempt < maxAttempts - 1)
+            catch (InvalidOperationException ex) when (IsDuplicateProtocoloError(ex))
             {
+                lastDuplicate = ex;
+                var conflict = TryExtractProtocoloFromDuplicateError(ex.Message);
+                if (!string.IsNullOrWhiteSpace(conflict))
+                {
+                    lastProtocolo = conflict;
+                }
+
                 await Task.Delay(TimeSpan.FromMilliseconds(40 * (attempt + 1)), cancellationToken);
             }
         }
 
-        throw new InvalidOperationException("Nao foi possivel gerar um protocolo unico para a demanda.");
+        throw lastDuplicate
+            ?? new InvalidOperationException("Nao foi possivel gerar um protocolo unico para a demanda.");
     }
 
     private async Task<string> GerarProtocoloAsync(CancellationToken cancellationToken)
     {
         var year = DateTime.UtcNow.Year;
         var prefix = $"LUX-{year}-";
+        // Busca só o maior protocolo do ano (evita truncamento do PostgREST em listagens grandes).
         var rows = await _supabase.QueryRowsAsync(
-            $"Demanda?select=protocolo&protocolo=like.{Uri.EscapeDataString(prefix + "%")}&limit=100000",
+            $"Demanda?select=protocolo&protocolo=like.{Uri.EscapeDataString(prefix + "%")}&order=protocolo.desc&limit=1",
             cancellationToken);
         var lastSequence = rows
             .Select(row => TryGetProtocolSequence(row.GetNullableString("protocolo"), prefix))
@@ -1075,6 +1095,23 @@ public sealed class DemandasService
             .DefaultIfEmpty(0)
             .Max();
         return $"{prefix}{(lastSequence + 1).ToString().PadLeft(5, '0')}";
+    }
+
+    private static string NextProtocoloAfter(string protocolo)
+    {
+        var year = DateTime.UtcNow.Year;
+        var prefix = $"LUX-{year}-";
+        var sequence = TryGetProtocolSequence(protocolo, prefix) ?? 0;
+        return $"{prefix}{(sequence + 1).ToString().PadLeft(5, '0')}";
+    }
+
+    private static string? TryExtractProtocoloFromDuplicateError(string message)
+    {
+        var match = Regex.Match(
+            message ?? string.Empty,
+            @"Key \(protocolo\)=\(([A-Za-z0-9\-]+)\)",
+            RegexOptions.IgnoreCase);
+        return match.Success ? match.Groups[1].Value : null;
     }
 
     private static int? TryGetProtocolSequence(string? protocolo, string prefix)
