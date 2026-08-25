@@ -96,13 +96,12 @@ public sealed class UpdateLuxusParceirosSaleStageRequest
 
 public sealed class UpdateLuxusParceirosDemandDetailsRequest
 {
-    [Required]
-    [MinLength(1)]
-    public string Subject { get; init; } = string.Empty;
+    public string? Subject { get; init; }
 
-    [Required]
-    [MinLength(1)]
-    public string Description { get; init; } = string.Empty;
+    public string? Description { get; init; }
+
+    /// <summary>Prazo no formato yyyy-MM-dd. Não pode ser anterior a hoje.</summary>
+    public string? Deadline { get; init; }
 
     public string? LocalProtocol { get; init; }
     public string? PartnerName { get; init; }

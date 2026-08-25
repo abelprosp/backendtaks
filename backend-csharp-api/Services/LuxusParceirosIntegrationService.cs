@@ -401,25 +401,51 @@ public sealed class LuxusParceirosIntegrationService
         var demand = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
         using var demandJson = JsonDocument.Parse(JsonSerializer.Serialize(demand));
         var currentSubject = ReadString(demandJson.RootElement, "assunto");
-        var prefixMatch = Regex.Match(currentSubject ?? string.Empty, @"^\[([^\]]+)\]\s*");
-        var cleanSubject = StripWorkflowPrefix(request.Subject.Trim());
-        var assunto = prefixMatch.Success
-            ? $"[{prefixMatch.Groups[1].Value}] {cleanSubject}"
-            : cleanSubject;
 
-        var cleanDescription = StripPartnerDocumentListing(request.Description);
-        var origin = new[]
+        string? assunto = null;
+        if (!string.IsNullOrWhiteSpace(request.Subject))
         {
-            $"Origem: Luxus Parceiros ({request.LocalProtocol ?? mapping.GetStringOrEmpty("external_request_id")})",
-            string.IsNullOrWhiteSpace(request.PartnerName) ? null : $"Parceiro: {request.PartnerName}",
-            string.IsNullOrWhiteSpace(request.BranchName) ? null : $"Filial: {request.BranchName}",
-            string.IsNullOrWhiteSpace(request.RequesterName)
-                ? null
-                : $"Solicitante: {request.RequesterName}"
-                  + (string.IsNullOrWhiteSpace(request.RequesterEmail) ? string.Empty : $" <{request.RequesterEmail}>"),
-            string.Empty,
-            cleanDescription,
-        };
+            var prefixMatch = Regex.Match(currentSubject ?? string.Empty, @"^\[([^\]]+)\]\s*");
+            var cleanSubject = StripWorkflowPrefix(request.Subject.Trim());
+            assunto = prefixMatch.Success
+                ? $"[{prefixMatch.Groups[1].Value}] {cleanSubject}"
+                : cleanSubject;
+        }
+
+        string? observacoes = null;
+        if (!string.IsNullOrWhiteSpace(request.Description))
+        {
+            var cleanDescription = StripPartnerDocumentListing(request.Description);
+            var origin = new[]
+            {
+                $"Origem: Luxus Parceiros ({request.LocalProtocol ?? mapping.GetStringOrEmpty("external_request_id")})",
+                string.IsNullOrWhiteSpace(request.PartnerName) ? null : $"Parceiro: {request.PartnerName}",
+                string.IsNullOrWhiteSpace(request.BranchName) ? null : $"Filial: {request.BranchName}",
+                string.IsNullOrWhiteSpace(request.RequesterName)
+                    ? null
+                    : $"Solicitante: {request.RequesterName}"
+                      + (string.IsNullOrWhiteSpace(request.RequesterEmail) ? string.Empty : $" <{request.RequesterEmail}>"),
+                string.Empty,
+                cleanDescription,
+            };
+            observacoes = string.Join('\n', origin.Where(line => line is not null));
+        }
+
+        JsonElement? prazoElement = null;
+        if (!string.IsNullOrWhiteSpace(request.Deadline))
+        {
+            if (!DateOnly.TryParseExact(request.Deadline.Trim(), "yyyy-MM-dd", out var deadline)
+                || deadline < DateOnly.FromDateTime(DateTime.Now))
+            {
+                throw new InvalidOperationException("O prazo não pode ser anterior à data de hoje.");
+            }
+            prazoElement = JsonSerializer.SerializeToElement(deadline.ToString("yyyy-MM-dd"));
+        }
+
+        if (assunto is null && observacoes is null && prazoElement is null)
+        {
+            throw new InvalidOperationException("Informe assunto, instruções ou prazo para atualizar.");
+        }
 
         return await _demandas.UpdateAsync(
             technicalUserId,
@@ -427,7 +453,8 @@ public sealed class LuxusParceirosIntegrationService
             new UpdateDemandaRequest
             {
                 Assunto = assunto,
-                ObservacoesGerais = string.Join('\n', origin.Where(line => line is not null)),
+                ObservacoesGerais = observacoes,
+                Prazo = prazoElement,
             },
             cancellationToken);
     }
