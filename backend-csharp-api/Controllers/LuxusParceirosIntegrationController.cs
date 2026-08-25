@@ -102,6 +102,22 @@ public sealed class LuxusParceirosIntegrationController : ControllerBase
         }
     }
 
+    [HttpPut("demandas/{externalRequestId}/detalhes")]
+    public async Task<IActionResult> UpdateDemandDetails(
+        string externalRequestId,
+        [FromBody] UpdateLuxusParceirosDemandDetailsRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!_integration.IsAuthorized(Request.Headers["x-integration-key"]))
+            return Unauthorized(new { message = "Integração não autorizada" });
+        try
+        {
+            return Ok(await _integration.UpdateDemandDetailsAsync(externalRequestId, request, cancellationToken));
+        }
+        catch (KeyNotFoundException ex) { return NotFound(new { message = ex.Message }); }
+        catch (InvalidOperationException ex) { return BadRequest(new { message = ex.Message }); }
+    }
+
     [HttpPost("demandas/{externalRequestId}/etapa-venda")]
     public async Task<IActionResult> UpdateSaleStage(
         string externalRequestId,

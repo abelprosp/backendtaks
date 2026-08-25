@@ -94,6 +94,23 @@ public sealed class UpdateLuxusParceirosSaleStageRequest
     public bool? ClearTurnRequest { get; init; }
 }
 
+public sealed class UpdateLuxusParceirosDemandDetailsRequest
+{
+    [Required]
+    [MinLength(1)]
+    public string Subject { get; init; } = string.Empty;
+
+    [Required]
+    [MinLength(1)]
+    public string Description { get; init; } = string.Empty;
+
+    public string? LocalProtocol { get; init; }
+    public string? PartnerName { get; init; }
+    public string? BranchName { get; init; }
+    public string? RequesterName { get; init; }
+    public string? RequesterEmail { get; init; }
+}
+
 public sealed class ImportLuxusParceirosDocumentsRequest
 {
     [Required]

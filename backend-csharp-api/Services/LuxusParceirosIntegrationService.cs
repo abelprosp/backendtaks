@@ -389,6 +389,49 @@ public sealed class LuxusParceirosIntegrationService
             cancellationToken);
     }
 
+    public async Task<object> UpdateDemandDetailsAsync(
+        string externalRequestId,
+        UpdateLuxusParceirosDemandDetailsRequest request,
+        CancellationToken cancellationToken)
+    {
+        var mapping = await FindMappingByExternalIdAsync(externalRequestId, cancellationToken)
+                      ?? throw new KeyNotFoundException("Demanda integrada não encontrada.");
+        var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
+        var demandaId = mapping.GetStringOrEmpty("demanda_id");
+        var demand = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
+        using var demandJson = JsonDocument.Parse(JsonSerializer.Serialize(demand));
+        var currentSubject = ReadString(demandJson.RootElement, "assunto");
+        var prefixMatch = Regex.Match(currentSubject ?? string.Empty, @"^\[([^\]]+)\]\s*");
+        var cleanSubject = StripWorkflowPrefix(request.Subject.Trim());
+        var assunto = prefixMatch.Success
+            ? $"[{prefixMatch.Groups[1].Value}] {cleanSubject}"
+            : cleanSubject;
+
+        var cleanDescription = StripPartnerDocumentListing(request.Description);
+        var origin = new[]
+        {
+            $"Origem: Luxus Parceiros ({request.LocalProtocol ?? mapping.GetStringOrEmpty("external_request_id")})",
+            string.IsNullOrWhiteSpace(request.PartnerName) ? null : $"Parceiro: {request.PartnerName}",
+            string.IsNullOrWhiteSpace(request.BranchName) ? null : $"Filial: {request.BranchName}",
+            string.IsNullOrWhiteSpace(request.RequesterName)
+                ? null
+                : $"Solicitante: {request.RequesterName}"
+                  + (string.IsNullOrWhiteSpace(request.RequesterEmail) ? string.Empty : $" <{request.RequesterEmail}>"),
+            string.Empty,
+            cleanDescription,
+        };
+
+        return await _demandas.UpdateAsync(
+            technicalUserId,
+            demandaId,
+            new UpdateDemandaRequest
+            {
+                Assunto = assunto,
+                ObservacoesGerais = string.Join('\n', origin.Where(line => line is not null)),
+            },
+            cancellationToken);
+    }
+
     public async Task<object> UpdateSaleStageAsync(
         string externalRequestId,
         UpdateLuxusParceirosSaleStageRequest request,
