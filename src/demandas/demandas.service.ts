@@ -66,6 +66,22 @@ function normalizePrazoColumn(value: unknown): string | null {
   return m ? m[1] : null;
 }
 
+const PRAZO_FINAL_OBRIGATORIO_MSG =
+  'Informe um prazo final válido. Toda demanda precisa ter uma data de vencimento.';
+
+function requirePrazoFinal(value: unknown): string {
+  const raw = String(value ?? '').trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    throw new BadRequestException(PRAZO_FINAL_OBRIGATORIO_MSG);
+  }
+  const [year, month, day] = raw.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    throw new BadRequestException(PRAZO_FINAL_OBRIGATORIO_MSG);
+  }
+  return raw;
+}
+
 function toCalendarDateOnlySaoPaulo(value: unknown): string | null {
   if (value == null || value === '') return null;
   const asText = String(value).trim();
@@ -959,6 +975,7 @@ export class DemandasService {
     filters: ListDemandasFiltersDto,
     ids?: string[] | null,
   ): Promise<{ data: any[]; total: number } | null> {
+    if (filters.condicaoPrazo === 'sem_prazo') return null;
     const { pageSize, offset } = this.getPagination(filters);
     const { data, error } = await this.supabase.getClient().rpc('rpc_list_demandas_page', {
       p_user_id: userId,
@@ -1152,7 +1169,7 @@ export class DemandasService {
     const demanda = await this.insertDemandaWithGeneratedProtocolo({
       assunto: dto.assunto,
       prioridade: dto.prioridade ?? false,
-      prazo: dto.prazo ?? null,
+      prazo: requirePrazoFinal(dto.prazo),
       status,
       criador_id: userId,
       observacoes_gerais: observacoesGeralNorm,
@@ -1243,7 +1260,7 @@ export class DemandasService {
     const demanda = await this.insertDemandaWithGeneratedProtocolo({
       assunto: dto.assunto,
       prioridade,
-      prazo: dto.prazo ?? null,
+      prazo: requirePrazoFinal(dto.prazo),
       status: 'em_aberto',
       criador_id: userId,
       observacoes_gerais: observacoesGerais !== undefined ? observacoesGerais : null,
@@ -2203,6 +2220,9 @@ export class DemandasService {
       q = q.neq('status', 'concluido').neq('status', 'cancelado').gt('prazo', todayInSaoPaulo);
     }
     if (filters.condicaoPrazo === 'finalizada') q = q.in('status', ['concluido', 'cancelado']);
+    if (filters.condicaoPrazo === 'sem_prazo') {
+      q = q.or('prazo.is.null,prazo.eq.');
+    }
     if (filters.dataCriacaoDe) q = q.gte('created_at', filters.dataCriacaoDe);
     if (filters.dataCriacaoAte) q = q.lte('created_at', filters.dataCriacaoAte);
     if (applyOcultarConcluidasFilter(filters)) {
@@ -2336,7 +2356,7 @@ export class DemandasService {
     if (dto.assunto != null) upd.assunto = dto.assunto;
     if (dto.prioridade !== undefined) upd.prioridade = dto.prioridade;
     if (dto.prazo !== undefined) {
-      upd.prazo = normalizePrazoColumn(dto.prazo);
+      upd.prazo = requirePrazoFinal(dto.prazo);
     }
     if (newStatus) {
       upd.status = newStatus;
@@ -3267,7 +3287,8 @@ export class DemandasService {
       filters.prioridade = true;
     }
 
-    if (normalizedQuery.includes('vencid')) filters.condicaoPrazo = 'vencido';
+    if (normalizedQuery.includes('sem prazo')) filters.condicaoPrazo = 'sem_prazo';
+    else if (normalizedQuery.includes('vencid')) filters.condicaoPrazo = 'vencido';
     else if (
       normalizedQuery.includes('no prazo') ||
       normalizedQuery.includes('dentro do prazo') ||
@@ -3695,7 +3716,7 @@ export class DemandasService {
 
     const statusValues = ['em_aberto', 'em_andamento', 'concluido', 'standby', 'cancelado'];
     const recorrenciaValues = ['diaria', 'semanal', 'quinzenal', 'mensal'];
-    const condicaoPrazoValues = ['vencido', 'no_prazo', 'finalizada'];
+    const condicaoPrazoValues = ['vencido', 'no_prazo', 'sem_prazo', 'finalizada'];
 
     const systemPrompt = `Você é um assistente que converte pedidos em português em um JSON para filtrar demandas e devolver um resumo amigável.
 Retorne APENAS JSON válido, sem markdown e sem texto fora do JSON.
@@ -3790,7 +3811,7 @@ Se não conseguir extrair filtros, retorne filters como {} e explique isso no ca
       if (ids.length) filters.setorIds = ids;
     }
     if (rawFilters.condicaoPrazo && condicaoPrazoValues.includes(rawFilters.condicaoPrazo as string)) {
-      filters.condicaoPrazo = rawFilters.condicaoPrazo as 'vencido' | 'no_prazo' | 'finalizada';
+      filters.condicaoPrazo = rawFilters.condicaoPrazo as 'vencido' | 'no_prazo' | 'sem_prazo' | 'finalizada';
     }
     if (typeof rawFilters.pesquisarTarefaOuObservacao === 'string' && rawFilters.pesquisarTarefaOuObservacao.trim()) {
       filters.pesquisarTarefaOuObservacao = rawFilters.pesquisarTarefaOuObservacao.trim();
