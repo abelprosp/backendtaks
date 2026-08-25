@@ -238,7 +238,15 @@ public sealed class LuxusParceirosIntegrationService
             var listed = await ListPartnerDocumentsAsync(request.RequestId, cancellationToken);
             foreach (var document in listed)
             {
-                if (usedFilenames.Contains(document.Name)) continue;
+                var shortId = document.Id.Replace("-", "");
+                if (shortId.Length > 8) shortId = shortId[..8];
+                var typedName = $"{document.Type}-{document.Name}";
+                if (usedFilenames.Any(name =>
+                        name.Contains(shortId, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(name, typedName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
                 try
                 {
                     var buffer = await ResolvePartnerDocumentBufferAsync(
@@ -622,12 +630,15 @@ public sealed class LuxusParceirosIntegrationService
                 failed.Add("documento sem id/nome");
                 continue;
             }
+            // Não pular só pelo nome original (ex.: vários "image.jpg" de CPF/RG).
+            // Só considera já importado se o filename único (tipo+nome ou id curto) já existe.
             var shortId = document.Id.Replace("-", "");
             if (shortId.Length > 8) shortId = shortId[..8];
+            var typedName = $"{document.Type}-{document.Name}";
             if (existingNames.Any(name =>
                     name.Contains(shortId, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(name, document.Name, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(name, $"{document.Type}-{document.Name}", StringComparison.OrdinalIgnoreCase)))
+                    || string.Equals(name, typedName, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(name, $"{document.Type}-{shortId}-{document.Name}", StringComparison.OrdinalIgnoreCase)))
             {
                 skipped++;
                 continue;
@@ -1149,9 +1160,23 @@ public sealed class LuxusParceirosIntegrationService
             if (!response.IsSuccessStatusCode) return [];
             var payload = await response.Content.ReadAsStringAsync(cancellationToken);
             using var json = JsonDocument.Parse(payload);
-            if (json.RootElement.ValueKind != JsonValueKind.Array) return [];
+            // A API do Parceiros envolve listas em { success, data: [...] }.
+            var listElement = json.RootElement;
+            if (listElement.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var property in listElement.EnumerateObject())
+                {
+                    if (string.Equals(property.Name, "data", StringComparison.OrdinalIgnoreCase)
+                        && property.Value.ValueKind == JsonValueKind.Array)
+                    {
+                        listElement = property.Value.Clone();
+                        break;
+                    }
+                }
+            }
+            if (listElement.ValueKind != JsonValueKind.Array) return [];
             var documents = new List<LuxusParceirosDocumentDto>();
-            foreach (var item in json.RootElement.EnumerateArray())
+            foreach (var item in listElement.EnumerateArray())
             {
                 var id = ReadString(item, "id");
                 var name = ReadString(item, "name");
