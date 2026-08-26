@@ -91,6 +91,7 @@ public sealed record TemplateDemandaSubtarefa(string Titulo, string? Responsavel
 public sealed record TemplateDemandaSource(
     string Id,
     string Name,
+    string? AssuntoTemplate,
     bool PrioridadeDefault,
     string? ObservacoesGeraisTemplate,
     bool IsRecorrenteDefault,

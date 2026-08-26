@@ -51,6 +51,52 @@ public sealed class TemplatesService
         return await FindOneAsync(templateId, cancellationToken);
     }
 
+    public async Task<string?> FindIdByNameAsync(string name, CancellationToken cancellationToken)
+    {
+        var trimmed = name.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            return null;
+        }
+
+        var exact = await _supabase.QuerySingleAsync(
+            $"Template?select=id,name&name=eq.{Uri.EscapeDataString(trimmed)}&limit=1",
+            cancellationToken);
+        var exactId = exact?.GetStringOrEmpty("id");
+        if (!string.IsNullOrWhiteSpace(exactId))
+        {
+            return exactId;
+        }
+
+        var looksLikeParceirosSale = trimmed.Contains("ALEX", StringComparison.OrdinalIgnoreCase)
+            && trimmed.Contains("PARCEIRO", StringComparison.OrdinalIgnoreCase)
+            && trimmed.Contains("VIVO", StringComparison.OrdinalIgnoreCase);
+        if (!looksLikeParceirosSale)
+        {
+            return null;
+        }
+
+        var fuzzy = await _supabase.QueryRowsAsync(
+            "Template?select=id,name&name=ilike.*ALEX*PARCEIRO*Venda*linha*nova*VIVO*&limit=10",
+            cancellationToken);
+        foreach (var row in fuzzy)
+        {
+            var templateName = row.GetStringOrEmpty("name");
+            if (templateName.Contains("ALEX", StringComparison.OrdinalIgnoreCase)
+                && templateName.Contains("PARCEIRO", StringComparison.OrdinalIgnoreCase)
+                && templateName.Contains("VIVO", StringComparison.OrdinalIgnoreCase))
+            {
+                var id = row.GetStringOrEmpty("id");
+                if (!string.IsNullOrWhiteSpace(id))
+                {
+                    return id;
+                }
+            }
+        }
+
+        return null;
+    }
+
     public async Task<IReadOnlyList<object>> FindAllAsync(CancellationToken cancellationToken)
     {
         var rpcRows = await FindAllViaRpcAsync(cancellationToken);
@@ -170,6 +216,7 @@ public sealed class TemplatesService
         return new TemplateDemandaSource(
             row.Value.GetStringOrEmpty("id"),
             row.Value.GetStringOrEmpty("name"),
+            row.Value.GetNullableString("assunto_template"),
             row.Value.GetBooleanOrDefault("prioridade_default"),
             row.Value.GetNullableString("observacoes_gerais_template"),
             row.Value.GetBooleanOrDefault("is_recorrente_default"),

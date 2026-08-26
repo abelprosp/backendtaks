@@ -46,6 +46,11 @@ builder.Services.Configure<AppOptions>(options =>
     options.LuxusParceirosIntegrationKey = builder.Configuration["LUXUS_PARCEIROS_INTEGRATION_KEY"] ?? string.Empty;
     options.LuxusParceirosCallbackUrl = builder.Configuration["LUXUS_PARCEIROS_CALLBACK_URL"] ?? string.Empty;
     options.LuxusParceirosTechnicalUserEmail = builder.Configuration["LUXUS_PARCEIROS_TECHNICAL_USER_EMAIL"] ?? "luxusparceiros@integration.local";
+    options.LuxusParceirosSaleTemplateId = builder.Configuration["LUXUS_PARCEIROS_SALE_TEMPLATE_ID"] ?? string.Empty;
+    var saleTemplateName = builder.Configuration["LUXUS_PARCEIROS_SALE_TEMPLATE_NAME"];
+    options.LuxusParceirosSaleTemplateName = string.IsNullOrWhiteSpace(saleTemplateName)
+        ? AppOptions.DefaultParceirosSaleTemplateName
+        : saleTemplateName.Trim();
 });
 
 builder.Services.AddHttpClient();

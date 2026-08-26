@@ -32,4 +32,8 @@ public sealed class AppOptions
     public string LuxusParceirosIntegrationKey { get; set; } = string.Empty;
     public string LuxusParceirosCallbackUrl { get; set; } = string.Empty;
     public string LuxusParceirosTechnicalUserEmail { get; set; } = "luxusparceiros@integration.local";
+    public const string DefaultParceirosSaleTemplateName =
+        "ALEX - PARCEIRO (META ou LINGO ou ELITE ou RAELCELL) - Venda linha nova VIVO";
+    public string LuxusParceirosSaleTemplateId { get; set; } = string.Empty;
+    public string LuxusParceirosSaleTemplateName { get; set; } = DefaultParceirosSaleTemplateName;
 }

@@ -13,10 +13,12 @@ public sealed class LuxusParceirosIntegrationService
 {
     private const string DefaultLuxusParceirosCallbackUrl =
         "https://luxusparceiros-production-df5d.up.railway.app/api/integrations/luxus-task/callback";
+    private const string ParceirosOriginMarker = "Origem: Luxus Parceiros";
 
     private readonly SupabaseRestService _supabase;
     private readonly DemandasService _demandas;
     private readonly ClientesService _clientes;
+    private readonly TemplatesService _templates;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly AppOptions _options;
 
@@ -24,12 +26,14 @@ public sealed class LuxusParceirosIntegrationService
         SupabaseRestService supabase,
         DemandasService demandas,
         ClientesService clientes,
+        TemplatesService templates,
         IHttpClientFactory httpClientFactory,
         IOptions<AppOptions> options)
     {
         _supabase = supabase;
         _demandas = demandas;
         _clientes = clientes;
+        _templates = templates;
         _httpClientFactory = httpClientFactory;
         _options = options.Value;
     }
@@ -139,36 +143,65 @@ public sealed class LuxusParceirosIntegrationService
         }
 
         var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
-        var cleanDescription = StripPartnerDocumentListing(request.Description);
-        var origin = new[]
+        var saleBlock = BuildParceirosOriginBlock(
+            request.LocalProtocol,
+            request.PartnerName,
+            request.BranchName,
+            request.RequesterName,
+            request.RequesterEmail,
+            request.Description);
+        var isSale = string.Equals(request.EntityType, "sale", StringComparison.OrdinalIgnoreCase);
+        var saleTemplate = isSale
+            ? await TryLoadParceirosSaleTemplateAsync(cancellationToken)
+            : null;
+
+        object created;
+        if (saleTemplate is not null)
         {
-            $"Origem: Luxus Parceiros ({request.LocalProtocol})",
-            $"Parceiro: {request.PartnerName}",
-            string.IsNullOrWhiteSpace(request.BranchName) ? null : $"Filial: {request.BranchName}",
-            $"Solicitante: {request.RequesterName} <{request.RequesterEmail}>",
-            string.Empty,
-            cleanDescription,
-        };
-        var created = await _demandas.CreateAsync(
-            technicalUserId,
-            new CreateDemandaRequest
-            {
-                Assunto = request.Subject.Trim(),
-                Prioridade = request.Priority ?? false,
-                Prazo = deadline.ToString("yyyy-MM-dd"),
-                Status = "em_aberto",
-                ObservacoesGerais = string.Join('\n', origin.Where(line => line is not null)),
-                ClienteIds = [client.Id],
-                Responsaveis =
-                [
-                    new DemandaResponsavelInput
-                    {
-                        UserId = request.ResponsibleId,
-                        IsPrincipal = true,
-                    },
-                ],
-            },
-            cancellationToken);
+            created = await _demandas.CreateFromTemplateAsync(
+                technicalUserId,
+                saleTemplate.Id,
+                new CreateDemandaFromTemplateRequest
+                {
+                    Assunto = BuildSaleAssuntoFromTemplate(
+                        saleTemplate,
+                        request.PartnerName,
+                        request.LocalProtocol),
+                    Prazo = deadline.ToString("yyyy-MM-dd"),
+                    Prioridade = request.Priority ?? saleTemplate.PrioridadeDefault,
+                    ObservacoesGerais = MergeParceirosObservacoes(
+                        saleTemplate.ObservacoesGeraisTemplate,
+                        saleBlock),
+                    ClienteIds = [client.Id],
+                    Responsaveis = MergeSaleResponsaveis(saleTemplate, request.ResponsibleId),
+                },
+                cancellationToken);
+            Console.WriteLine(
+                $"[luxus-parceiros] Venda {request.LocalProtocol} criada a partir do template '{saleTemplate.Name}'.");
+        }
+        else
+        {
+            created = await _demandas.CreateAsync(
+                technicalUserId,
+                new CreateDemandaRequest
+                {
+                    Assunto = request.Subject.Trim(),
+                    Prioridade = request.Priority ?? false,
+                    Prazo = deadline.ToString("yyyy-MM-dd"),
+                    Status = "em_aberto",
+                    ObservacoesGerais = saleBlock,
+                    ClienteIds = [client.Id],
+                    Responsaveis =
+                    [
+                        new DemandaResponsavelInput
+                        {
+                            UserId = request.ResponsibleId,
+                            IsPrincipal = true,
+                        },
+                    ],
+                },
+                cancellationToken);
+        }
 
         using var createdJson = JsonDocument.Parse(JsonSerializer.Serialize(created));
         var demandaId = ReadString(createdJson.RootElement, "id");
@@ -398,30 +431,40 @@ public sealed class LuxusParceirosIntegrationService
         var demandaId = mapping.GetStringOrEmpty("demanda_id");
         var demand = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
         using var demandJson = JsonDocument.Parse(JsonSerializer.Serialize(demand));
+        var currentAssunto = StripWorkflowPrefix(ReadString(demandJson.RootElement, "assunto"));
+        var currentObs = ReadString(demandJson.RootElement, "observacoesGerais");
+        if (string.IsNullOrWhiteSpace(currentObs))
+        {
+            currentObs = ReadString(demandJson.RootElement, "observacoes_gerais");
+        }
 
         string? assunto = null;
         if (!string.IsNullOrWhiteSpace(request.Subject))
         {
-            assunto = StripWorkflowPrefix(request.Subject.Trim());
+            var incoming = StripWorkflowPrefix(request.Subject.Trim());
+            assunto = LooksLikeParceirosSaleTemplateAssunto(currentAssunto)
+                ? currentAssunto
+                : incoming;
         }
 
         string? observacoes = null;
         if (!string.IsNullOrWhiteSpace(request.Description))
         {
-            var cleanDescription = StripPartnerDocumentListing(request.Description);
-            var origin = new[]
+            var protocol = !string.IsNullOrWhiteSpace(request.LocalProtocol)
+                ? request.LocalProtocol
+                : mapping.GetStringOrEmpty("external_protocol");
+            if (string.IsNullOrWhiteSpace(protocol))
             {
-                $"Origem: Luxus Parceiros ({request.LocalProtocol ?? mapping.GetStringOrEmpty("external_request_id")})",
-                string.IsNullOrWhiteSpace(request.PartnerName) ? null : $"Parceiro: {request.PartnerName}",
-                string.IsNullOrWhiteSpace(request.BranchName) ? null : $"Filial: {request.BranchName}",
-                string.IsNullOrWhiteSpace(request.RequesterName)
-                    ? null
-                    : $"Solicitante: {request.RequesterName}"
-                      + (string.IsNullOrWhiteSpace(request.RequesterEmail) ? string.Empty : $" <{request.RequesterEmail}>"),
-                string.Empty,
-                cleanDescription,
-            };
-            observacoes = string.Join('\n', origin.Where(line => line is not null));
+                protocol = mapping.GetStringOrEmpty("external_request_id");
+            }
+            var saleBlock = BuildParceirosOriginBlock(
+                protocol,
+                request.PartnerName,
+                request.BranchName,
+                request.RequesterName,
+                request.RequesterEmail,
+                request.Description);
+            observacoes = MergeParceirosObservacoes(currentObs, saleBlock);
         }
 
         JsonElement? prazoElement = null;
@@ -1249,6 +1292,163 @@ public sealed class LuxusParceirosIntegrationService
 
     private static string StripWorkflowPrefix(string subject) =>
         Regex.Replace(subject ?? string.Empty, @"^\[[^\]]+\]\s*", string.Empty).Trim();
+
+    private static string BuildParceirosOriginBlock(
+        string? localProtocol,
+        string? partnerName,
+        string? branchName,
+        string? requesterName,
+        string? requesterEmail,
+        string? description)
+    {
+        var cleanDescription = StripPartnerDocumentListing(description);
+        var origin = new[]
+        {
+            $"Origem: Luxus Parceiros ({localProtocol})",
+            string.IsNullOrWhiteSpace(partnerName) ? null : $"Parceiro: {partnerName}",
+            string.IsNullOrWhiteSpace(branchName) ? null : $"Filial: {branchName}",
+            string.IsNullOrWhiteSpace(requesterName)
+                ? null
+                : $"Solicitante: {requesterName}"
+                  + (string.IsNullOrWhiteSpace(requesterEmail) ? string.Empty : $" <{requesterEmail}>"),
+            string.Empty,
+            cleanDescription,
+        };
+        return string.Join('\n', origin.Where(line => line is not null));
+    }
+
+    private static string MergeParceirosObservacoes(string? existing, string parceirosBlock)
+    {
+        var current = (existing ?? string.Empty).Trim();
+        var block = (parceirosBlock ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(current))
+        {
+            return block;
+        }
+        if (string.IsNullOrWhiteSpace(block))
+        {
+            return current;
+        }
+
+        var idx = current.IndexOf(ParceirosOriginMarker, StringComparison.OrdinalIgnoreCase);
+        var prefix = idx >= 0 ? current[..idx].TrimEnd() : current;
+        return string.IsNullOrWhiteSpace(prefix) ? block : $"{prefix}\n\n{block}";
+    }
+
+    private static bool LooksLikeParceirosSaleTemplateAssunto(string? assunto) =>
+        !string.IsNullOrWhiteSpace(assunto)
+        && Regex.IsMatch(assunto, @"venda\s+linha\s+nova", RegexOptions.IgnoreCase);
+
+    private static string ResolvePartnerBrand(string? partnerName)
+    {
+        var value = (partnerName ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "PARCEIRO";
+        }
+
+        var upper = value.ToUpperInvariant();
+        if (upper.Contains("RAEL", StringComparison.Ordinal)) return "RAELCELL";
+        if (upper.Contains("LINGO", StringComparison.Ordinal)) return "LINGO";
+        if (upper.Contains("ELITE", StringComparison.Ordinal)) return "ELITE";
+        if (upper.Contains("META", StringComparison.Ordinal)) return "META";
+        return upper;
+    }
+
+    private static string BuildSaleAssuntoFromTemplate(
+        TemplateDemandaSource template,
+        string? partnerName,
+        string? localProtocol)
+    {
+        var brand = ResolvePartnerBrand(partnerName);
+        var source = !string.IsNullOrWhiteSpace(template.AssuntoTemplate)
+            ? template.AssuntoTemplate.Trim()
+            : template.Name.Trim();
+        var assunto = Regex.Replace(
+            source,
+            @"PARCEIRO\s*\(\s*META\s+ou\s+LINGO\s+ou\s+ELITE\s+ou\s+RAELCELL\s*\)",
+            brand,
+            RegexOptions.IgnoreCase);
+        assunto = Regex.Replace(
+            assunto,
+            @"\(\s*META\s+ou\s+LINGO\s+ou\s+ELITE\s+ou\s+RAELCELL\s*\)",
+            brand,
+            RegexOptions.IgnoreCase);
+        assunto = Regex.Replace(
+            assunto,
+            @"(?<=-\s*)PARCEIRO(?=\s*-)",
+            brand,
+            RegexOptions.IgnoreCase);
+        if (!string.IsNullOrWhiteSpace(localProtocol)
+            && assunto.IndexOf(localProtocol, StringComparison.OrdinalIgnoreCase) < 0)
+        {
+            assunto = $"{assunto} · {localProtocol.Trim()}";
+        }
+        return assunto.Trim();
+    }
+
+    private static List<DemandaResponsavelInput> MergeSaleResponsaveis(
+        TemplateDemandaSource template,
+        string partnerResponsibleId)
+    {
+        var result = new List<DemandaResponsavelInput>
+        {
+            new()
+            {
+                UserId = partnerResponsibleId,
+                IsPrincipal = true,
+            },
+        };
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { partnerResponsibleId };
+        foreach (var item in template.Responsaveis)
+        {
+            if (string.IsNullOrWhiteSpace(item.UserId) || !seen.Add(item.UserId))
+            {
+                continue;
+            }
+            result.Add(new DemandaResponsavelInput
+            {
+                UserId = item.UserId,
+                IsPrincipal = false,
+            });
+        }
+        return result;
+    }
+
+    private async Task<TemplateDemandaSource?> TryLoadParceirosSaleTemplateAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var configuredId = _options.LuxusParceirosSaleTemplateId?.Trim();
+            string? templateId = null;
+            if (!string.IsNullOrWhiteSpace(configuredId) && Guid.TryParse(configuredId, out _))
+            {
+                templateId = configuredId;
+            }
+            else
+            {
+                var name = string.IsNullOrWhiteSpace(_options.LuxusParceirosSaleTemplateName)
+                    ? AppOptions.DefaultParceirosSaleTemplateName
+                    : _options.LuxusParceirosSaleTemplateName.Trim();
+                templateId = await _templates.FindIdByNameAsync(name, cancellationToken);
+            }
+
+            if (string.IsNullOrWhiteSpace(templateId))
+            {
+                Console.Error.WriteLine(
+                    "[luxus-parceiros] Template de venda Parceiros não encontrado; criando demanda sem o modelo padrão.");
+                return null;
+            }
+
+            return await _templates.LoadForDemandaAsync(templateId, cancellationToken);
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine(
+                $"[luxus-parceiros] Falha ao carregar template de venda Parceiros: {error.Message}");
+            return null;
+        }
+    }
 
     private async Task<string> EnsureTechnicalUserAsync(CancellationToken cancellationToken)
     {
