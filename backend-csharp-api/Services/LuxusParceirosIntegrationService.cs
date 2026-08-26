@@ -153,9 +153,7 @@ public sealed class LuxusParceirosIntegrationService
             technicalUserId,
             new CreateDemandaRequest
             {
-                Assunto = string.Equals(request.EntityType, "sale", StringComparison.OrdinalIgnoreCase)
-                    ? $"[Aguardando Luxus Task] {request.Subject.Trim()}"
-                    : request.Subject.Trim(),
+                Assunto = request.Subject.Trim(),
                 Prioridade = request.Priority ?? false,
                 Prazo = deadline.ToString("yyyy-MM-dd"),
                 Status = "em_aberto",
@@ -400,16 +398,11 @@ public sealed class LuxusParceirosIntegrationService
         var demandaId = mapping.GetStringOrEmpty("demanda_id");
         var demand = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
         using var demandJson = JsonDocument.Parse(JsonSerializer.Serialize(demand));
-        var currentSubject = ReadString(demandJson.RootElement, "assunto");
 
         string? assunto = null;
         if (!string.IsNullOrWhiteSpace(request.Subject))
         {
-            var prefixMatch = Regex.Match(currentSubject ?? string.Empty, @"^\[([^\]]+)\]\s*");
-            var cleanSubject = StripWorkflowPrefix(request.Subject.Trim());
-            assunto = prefixMatch.Success
-                ? $"[{prefixMatch.Groups[1].Value}] {cleanSubject}"
-                : cleanSubject;
+            assunto = StripWorkflowPrefix(request.Subject.Trim());
         }
 
         string? observacoes = null;
@@ -542,11 +535,15 @@ public sealed class LuxusParceirosIntegrationService
             var currentCompleted = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
             using var currentCompletedJson = JsonDocument.Parse(JsonSerializer.Serialize(currentCompleted));
             var completedSubject = StripWorkflowPrefix(ReadString(currentCompletedJson.RootElement, "assunto"));
-            await _demandas.UpdateAsync(technicalUserId, demandaId, new UpdateDemandaRequest
+            // Finaliza só o vínculo da venda no Parceiros.
+            // A demanda no Task permanece no status atual para outros trâmites.
+            if (!string.IsNullOrWhiteSpace(completedSubject))
             {
-                Status = "concluido",
-                Assunto = $"[Venda concluída] {completedSubject}",
-            }, cancellationToken);
+                await _demandas.UpdateAsync(technicalUserId, demandaId, new UpdateDemandaRequest
+                {
+                    Assunto = completedSubject,
+                }, cancellationToken);
+            }
             await _supabase.UpdateSingleAsync(
                 "luxus_parceiros_demanda",
                 $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
@@ -562,7 +559,7 @@ public sealed class LuxusParceirosIntegrationService
             await _demandas.AddObservacaoAsync(
                 technicalUserId,
                 demandaId,
-                $"[ETAPA LUXUS PARCEIROS] Venda concluída. {request.Note}".Trim(),
+                $"[ETAPA LUXUS PARCEIROS] Venda finalizada no Parceiros. A demanda Task permanece aberta. {request.Note}".Trim(),
                 cancellationToken);
             var refreshedCompleted = await FindMappingByExternalIdAsync(externalRequestId, cancellationToken)
                                      ?? throw new KeyNotFoundException("Demanda integrada não encontrada.");
@@ -606,22 +603,22 @@ public sealed class LuxusParceirosIntegrationService
             await _demandas.UpdateAsync(technicalUserId, demandaId, new UpdateDemandaRequest
             {
                 Status = "em_andamento",
-                Assunto = $"[Contrato assinado enviado para conferência] {subject}",
+                Assunto = subject,
             }, cancellationToken);
         }
 
         var label = request.Stage.ToUpperInvariant() switch
         {
-            "AWAITING_PARTNER_SIGNATURE" => "Aguardando assinatura do parceiro",
-            "TASK_VALIDATING_SIGNED_CONTRACT" => "Contrato assinado recebido — aguardando validação final",
-            "TASK_PROCESSING" => "Aguardando Luxus Task",
-            "BLANK_CONTRACT_READY_FOR_ADMIN" => "Contrato em branco recebido",
-            "SIGNED_CONTRACT_READY_FOR_ADMIN" => "Contrato assinado pelo parceiro",
-            "TASK_APPROVED_REVIEW_PENDING" => "Contrato aprovado no Luxus Task",
-            "TASK_REJECTED_REVIEW_PENDING" => "Contrato recusado no Luxus Task",
-            "CHANGES_REQUESTED" => "Correção do contrato solicitada",
-            "COMPLETED" => "Venda concluída",
-            _ => request.Stage,
+            "AWAITING_PARTNER_SIGNATURE" => "Em andamento",
+            "TASK_VALIDATING_SIGNED_CONTRACT" => "Em andamento",
+            "TASK_PROCESSING" => "Em andamento",
+            "BLANK_CONTRACT_READY_FOR_ADMIN" => "Em andamento",
+            "SIGNED_CONTRACT_READY_FOR_ADMIN" => "Em andamento",
+            "TASK_APPROVED_REVIEW_PENDING" => "Em andamento",
+            "TASK_REJECTED_REVIEW_PENDING" => "Em andamento",
+            "CHANGES_REQUESTED" => "Em andamento",
+            "COMPLETED" => "Concluído",
+            _ => "Em andamento",
         };
         await _demandas.AddObservacaoAsync(
             technicalUserId,
@@ -632,11 +629,14 @@ public sealed class LuxusParceirosIntegrationService
         using (var labelJson = JsonDocument.Parse(JsonSerializer.Serialize(demandForLabel)))
         {
             var cleanSubject = StripWorkflowPrefix(ReadString(labelJson.RootElement, "assunto"));
-            await _supabase.UpdateSingleAsync(
-                "Demanda",
-                $"id=eq.{Uri.EscapeDataString(demandaId)}",
-                new { assunto = $"[{label}] {cleanSubject}" },
-                cancellationToken);
+            if (!string.IsNullOrWhiteSpace(cleanSubject))
+            {
+                await _supabase.UpdateSingleAsync(
+                    "Demanda",
+                    $"id=eq.{Uri.EscapeDataString(demandaId)}",
+                    new { assunto = cleanSubject },
+                    cancellationToken);
+            }
         }
         await _supabase.UpdateSingleAsync(
             "luxus_parceiros_demanda",
@@ -1047,43 +1047,8 @@ public sealed class LuxusParceirosIntegrationService
             })
             .Where(item => !string.IsNullOrWhiteSpace(item.id))
             .ToArray();
-        if (isSaleWorkflow
-            && (string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(taskStatus, "cancelado", StringComparison.OrdinalIgnoreCase)))
-        {
-            var validatingSignedContract = string.Equals(
-                workflowStage,
-                "TASK_VALIDATING_SIGNED_CONTRACT",
-                StringComparison.OrdinalIgnoreCase);
-            var next = string.Equals(taskStatus, "cancelado", StringComparison.OrdinalIgnoreCase)
-                ? "TASK_REJECTED_REVIEW_PENDING"
-                : validatingSignedContract
-                    && string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase)
-                    ? "TASK_APPROVED_REVIEW_PENDING"
-                    : workflowStage;
-            if (!string.Equals(next, workflowStage, StringComparison.OrdinalIgnoreCase))
-            {
-                workflowStage = next;
-                await _supabase.UpdateSingleAsync(
-                    "luxus_parceiros_demanda",
-                    $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
-                    new { workflow_stage = workflowStage, updated_at = DateTimeOffset.UtcNow },
-                    cancellationToken);
-                var cleanSubject = StripWorkflowPrefix(ReadString(root, "assunto"));
-                var prefix = workflowStage switch
-                {
-                    "TASK_APPROVED_REVIEW_PENDING" => "Contrato aprovado no Luxus Task",
-                    "TASK_REJECTED_REVIEW_PENDING" => "Contrato recusado no Luxus Task",
-                    "BLANK_CONTRACT_READY_FOR_ADMIN" => "Contrato em branco recebido",
-                    _ => "Contrato em branco recebido",
-                };
-                await _supabase.UpdateSingleAsync(
-                    "Demanda",
-                    $"id=eq.{Uri.EscapeDataString(ReadString(root, "id"))}",
-                    new { assunto = $"[{prefix}] {cleanSubject}" },
-                    cancellationToken);
-            }
-        }
+        // status concluido/cancelado da demanda Task NÃO altera workflow_stage da venda.
+        // A venda no Parceiros só finaliza com Stage=COMPLETED explícito.
         var resolution = taskResponses.Length > 0
             ? taskResponses[^1]
             : string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase)
