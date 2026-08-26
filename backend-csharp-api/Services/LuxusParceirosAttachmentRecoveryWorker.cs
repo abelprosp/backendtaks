@@ -34,6 +34,15 @@ public sealed class LuxusParceirosAttachmentRecoveryWorker : BackgroundService
                         "Recuperação automática importou anexos de {Recovered} venda(s) do Luxus Parceiros.",
                         recovered);
                 }
+
+                var applied = await integration
+                    .ApplyMissingParceirosSaleTemplatesAsync(stoppingToken);
+                if (applied > 0)
+                {
+                    _logger.LogInformation(
+                        "Aplicou o template de venda Parceiros em {Applied} demanda(s) já existentes.",
+                        applied);
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

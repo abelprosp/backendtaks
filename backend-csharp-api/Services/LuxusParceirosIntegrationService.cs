@@ -404,6 +404,37 @@ public sealed class LuxusParceirosIntegrationService
         return recovered;
     }
 
+    public async Task<int> ApplyMissingParceirosSaleTemplatesAsync(CancellationToken cancellationToken)
+    {
+        var template = await TryLoadParceirosSaleTemplateAsync(cancellationToken);
+        if (template is null)
+        {
+            return 0;
+        }
+
+        var mappings = await _supabase.QueryRowsAsync(
+            "luxus_parceiros_demanda?select=id,demanda_id,external_protocol,entity_type&entity_type=eq.sale&limit=500",
+            cancellationToken);
+        var applied = 0;
+        foreach (var mapping in mappings)
+        {
+            try
+            {
+                if (await ApplySaleTemplateLayoutAsync(mapping, template, cancellationToken))
+                {
+                    applied++;
+                }
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine(
+                    $"[luxus-parceiros] Falha ao aplicar template na demanda {mapping.GetStringOrEmpty("demanda_id")}: {error.Message}");
+            }
+        }
+
+        return applied;
+    }
+
     public async Task<object> AddCommentAsync(
         string externalRequestId,
         AddLuxusParceirosCommentRequest request,
@@ -1448,6 +1479,208 @@ public sealed class LuxusParceirosIntegrationService
                 $"[luxus-parceiros] Falha ao carregar template de venda Parceiros: {error.Message}");
             return null;
         }
+    }
+
+    private async Task<bool> ApplySaleTemplateLayoutAsync(
+        JsonElement mapping,
+        TemplateDemandaSource template,
+        CancellationToken cancellationToken)
+    {
+        var demandaId = mapping.GetStringOrEmpty("demanda_id");
+        if (string.IsNullOrWhiteSpace(demandaId))
+        {
+            return false;
+        }
+
+        var demand = await _supabase.QuerySingleAsync(
+            $"Demanda?select=id,assunto,status,observacoes_gerais&id=eq.{Uri.EscapeDataString(demandaId)}&limit=1",
+            cancellationToken);
+        if (demand is null)
+        {
+            return false;
+        }
+
+        var status = demand.Value.GetStringOrEmpty("status");
+        if (string.Equals(status, "concluido", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(status, "cancelado", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var currentAssunto = StripWorkflowPrefix(demand.Value.GetStringOrEmpty("assunto"));
+        var currentObs = demand.Value.GetNullableString("observacoes_gerais") ?? string.Empty;
+        var existingSubtarefas = await _supabase.QueryRowsAsync(
+            $"subtarefa?select=titulo,ordem&demanda_id=eq.{Uri.EscapeDataString(demandaId)}",
+            cancellationToken);
+        var existingTitles = existingSubtarefas
+            .Select(row => row.GetStringOrEmpty("titulo").Trim())
+            .Where(title => !string.IsNullOrWhiteSpace(title))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var missingSubtarefas = template.Subtarefas
+            .Where(item => !string.IsNullOrWhiteSpace(item.Titulo)
+                && !existingTitles.Contains(item.Titulo.Trim()))
+            .ToList();
+
+        var existingSetores = await _supabase.QueryRowsAsync(
+            $"demanda_setor?select=setor_id&demanda_id=eq.{Uri.EscapeDataString(demandaId)}",
+            cancellationToken);
+        var existingSetorIds = existingSetores
+            .Select(row => row.GetStringOrEmpty("setor_id"))
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var missingSetores = template.SetorIds
+            .Where(id => !string.IsNullOrWhiteSpace(id) && !existingSetorIds.Contains(id))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var existingResponsaveis = await _supabase.QueryRowsAsync(
+            $"demanda_responsavel?select=user_id&demanda_id=eq.{Uri.EscapeDataString(demandaId)}",
+            cancellationToken);
+        var existingUserIds = existingResponsaveis
+            .Select(row => row.GetStringOrEmpty("user_id"))
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var missingResponsaveis = template.Responsaveis
+            .Where(item => !string.IsNullOrWhiteSpace(item.UserId) && !existingUserIds.Contains(item.UserId))
+            .ToList();
+
+        var needAssunto = !LooksLikeParceirosSaleTemplateAssunto(currentAssunto);
+        var needObs = !HasTemplateObservations(currentObs, template.ObservacoesGeraisTemplate);
+        if (!needAssunto && !needObs && missingSubtarefas.Count == 0
+            && missingSetores.Count == 0 && missingResponsaveis.Count == 0)
+        {
+            return false;
+        }
+
+        var protocol = mapping.GetStringOrEmpty("external_protocol");
+        var partnerName = ExtractPartnerName(currentAssunto, currentObs);
+        var updates = new Dictionary<string, object?>();
+        if (needAssunto)
+        {
+            updates["assunto"] = BuildSaleAssuntoFromTemplate(template, partnerName, protocol);
+        }
+        if (needObs)
+        {
+            var saleBlock = ExtractParceirosSaleBlock(currentObs, protocol, partnerName);
+            updates["observacoes_gerais"] = MergeParceirosObservacoes(
+                template.ObservacoesGeraisTemplate,
+                saleBlock);
+        }
+        if (updates.Count > 0)
+        {
+            updates["updated_at"] = DateTimeOffset.UtcNow;
+            await _supabase.UpdateSingleAsync(
+                "Demanda",
+                $"id=eq.{Uri.EscapeDataString(demandaId)}",
+                updates,
+                cancellationToken);
+        }
+
+        if (missingSubtarefas.Count > 0)
+        {
+            var nextOrdem = existingSubtarefas
+                .Select(row => row.GetNullableInt32("ordem") ?? 0)
+                .DefaultIfEmpty(-1)
+                .Max() + 1;
+            await _supabase.InsertManyAsync(
+                "subtarefa",
+                missingSubtarefas.Select((item, index) => new
+                {
+                    demanda_id = demandaId,
+                    titulo = item.Titulo.Trim(),
+                    concluida = false,
+                    ordem = nextOrdem + index,
+                    responsavel_user_id = Guid.TryParse(item.ResponsavelUserId, out _)
+                        ? item.ResponsavelUserId
+                        : null,
+                }),
+                cancellationToken);
+        }
+
+        if (missingSetores.Count > 0)
+        {
+            await _supabase.InsertManyAsync(
+                "demanda_setor",
+                missingSetores.Select(setorId => new { demanda_id = demandaId, setor_id = setorId }),
+                cancellationToken);
+        }
+
+        if (missingResponsaveis.Count > 0)
+        {
+            await _supabase.InsertManyAsync(
+                "demanda_responsavel",
+                missingResponsaveis.Select(item => new
+                {
+                    demanda_id = demandaId,
+                    user_id = item.UserId,
+                    is_principal = false,
+                }),
+                cancellationToken);
+        }
+
+        Console.WriteLine(
+            $"[luxus-parceiros] Template de venda aplicado na demanda {demandaId} (protocolo {protocol}).");
+        return true;
+    }
+
+    private static bool HasTemplateObservations(string? current, string? templateObs)
+    {
+        if (string.IsNullOrWhiteSpace(templateObs))
+        {
+            return true;
+        }
+
+        var needle = templateObs
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault();
+        return !string.IsNullOrWhiteSpace(needle)
+            && (current ?? string.Empty).IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static string? ExtractPartnerName(string? assunto, string? observacoes)
+    {
+        if (!string.IsNullOrWhiteSpace(observacoes))
+        {
+            var fromObs = Regex.Match(
+                observacoes,
+                @"^Parceiro:\s*(.+)\s*$",
+                RegexOptions.Multiline | RegexOptions.IgnoreCase);
+            if (fromObs.Success)
+            {
+                return fromObs.Groups[1].Value.Trim();
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(assunto))
+        {
+            var fromAssunto = Regex.Match(
+                assunto,
+                @"^Venda\s+\S+\s+(.+?)\s+Linha\b",
+                RegexOptions.IgnoreCase);
+            if (fromAssunto.Success)
+            {
+                return fromAssunto.Groups[1].Value.Trim();
+            }
+        }
+
+        return null;
+    }
+
+    private static string ExtractParceirosSaleBlock(string? currentObs, string? protocol, string? partnerName)
+    {
+        var current = (currentObs ?? string.Empty).Trim();
+        var idx = current.IndexOf(ParceirosOriginMarker, StringComparison.OrdinalIgnoreCase);
+        if (idx >= 0)
+        {
+            return current[idx..].Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(current))
+        {
+            return current;
+        }
+
+        return BuildParceirosOriginBlock(protocol, partnerName, null, null, null, null);
     }
 
     private async Task<string> EnsureTechnicalUserAsync(CancellationToken cancellationToken)
