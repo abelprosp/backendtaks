@@ -14,6 +14,10 @@ public sealed class LuxusParceirosIntegrationService
     private const string DefaultLuxusParceirosCallbackUrl =
         "https://luxusparceiros-production-df5d.up.railway.app/api/integrations/luxus-task/callback";
     private const string ParceirosOriginMarker = "Origem: Luxus Parceiros";
+    private const string TechnicalUserDisplayName = "Luxus Parceiros";
+    private static readonly Regex NomeLinhaPlaceholderRegex = new(
+        @"\(\s*nome\s+e\s+n[uú]mero\s+da\s+linha\s*\)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private readonly SupabaseRestService _supabase;
     private readonly DemandasService _demandas;
@@ -143,13 +147,16 @@ public sealed class LuxusParceirosIntegrationService
         }
 
         var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
+        var saleDescription = !string.IsNullOrWhiteSpace(request.Observations)
+            ? request.Observations
+            : request.Description;
         var saleBlock = BuildParceirosOriginBlock(
             request.LocalProtocol,
             request.PartnerName,
             request.BranchName,
             request.RequesterName,
             request.RequesterEmail,
-            request.Description);
+            saleDescription);
         var isSale = string.Equals(request.EntityType, "sale", StringComparison.OrdinalIgnoreCase);
         var saleTemplate = isSale
             ? await TryLoadParceirosSaleTemplateAsync(cancellationToken)
@@ -166,12 +173,12 @@ public sealed class LuxusParceirosIntegrationService
                     Assunto = BuildSaleAssuntoFromTemplate(
                         saleTemplate,
                         request.PartnerName,
-                        request.LocalProtocol),
+                        request.LocalProtocol,
+                        request.Subject),
                     Prazo = deadline.ToString("yyyy-MM-dd"),
                     Prioridade = request.Priority ?? saleTemplate.PrioridadeDefault,
-                    ObservacoesGerais = MergeParceirosObservacoes(
-                        saleTemplate.ObservacoesGeraisTemplate,
-                        saleBlock),
+                    // Instruções = só o texto nativo do template (dados da venda vão em observação).
+                    ObservacoesGerais = saleTemplate.ObservacoesGeraisTemplate ?? string.Empty,
                     ClienteIds = [client.Id],
                     Responsaveis = MergeSaleResponsaveis(saleTemplate, request.ResponsibleId),
                 },
@@ -189,7 +196,7 @@ public sealed class LuxusParceirosIntegrationService
                     Prioridade = request.Priority ?? false,
                     Prazo = deadline.ToString("yyyy-MM-dd"),
                     Status = "em_aberto",
-                    ObservacoesGerais = saleBlock,
+                    ObservacoesGerais = request.Instructions?.Trim() ?? string.Empty,
                     ClienteIds = [client.Id],
                     Responsaveis =
                     [
@@ -209,6 +216,19 @@ public sealed class LuxusParceirosIntegrationService
         if (string.IsNullOrWhiteSpace(demandaId))
         {
             throw new InvalidOperationException("O Luxus Task criou a demanda sem retornar seu identificador.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(saleBlock))
+        {
+            try
+            {
+                await _demandas.AddObservacaoAsync(technicalUserId, demandaId, saleBlock, cancellationToken);
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine(
+                    $"[luxus-parceiros] Falha ao gravar observação inicial da demanda {demandaId}: {error.Message}");
+            }
         }
 
         var mapping = await _supabase.InsertSingleAsync(
@@ -406,6 +426,8 @@ public sealed class LuxusParceirosIntegrationService
 
     public async Task<int> ApplyMissingParceirosSaleTemplatesAsync(CancellationToken cancellationToken)
     {
+        await EnsureTechnicalUserAsync(cancellationToken);
+
         var template = await TryLoadParceirosSaleTemplateAsync(cancellationToken);
         if (template is null)
         {
@@ -413,7 +435,7 @@ public sealed class LuxusParceirosIntegrationService
         }
 
         var mappings = await _supabase.QueryRowsAsync(
-            "luxus_parceiros_demanda?select=id,demanda_id,external_protocol,entity_type&entity_type=eq.sale&limit=500",
+            "luxus_parceiros_demanda?select=id,demanda_id,external_request_id,external_protocol,entity_type&entity_type=eq.sale&limit=500",
             cancellationToken);
         var applied = 0;
         foreach (var mapping in mappings)
@@ -473,13 +495,24 @@ public sealed class LuxusParceirosIntegrationService
         if (!string.IsNullOrWhiteSpace(request.Subject))
         {
             var incoming = StripWorkflowPrefix(request.Subject.Trim());
-            assunto = LooksLikeParceirosSaleTemplateAssunto(currentAssunto)
-                ? currentAssunto
-                : incoming;
+            if (HasNomeLinhaPlaceholder(currentAssunto))
+            {
+                // Só preenche o placeholder do template; nunca sobrescreve título já editado.
+                assunto = ReplaceNomeLinhaPlaceholder(currentAssunto, incoming);
+            }
+            else if (!LooksLikeParceirosSaleTemplateAssunto(currentAssunto)
+                     && !string.Equals(currentAssunto, incoming, StringComparison.Ordinal))
+            {
+                assunto = incoming;
+            }
         }
 
+        // Dados da venda/cliente NÃO entram em Instruções (observacoes_gerais).
+        // Em sync posterior, só atualizamos prazo/assunto (placeholder); descrição vira observação se ainda não existir.
         string? observacoes = null;
-        if (!string.IsNullOrWhiteSpace(request.Description))
+        var shouldAddSaleObservation = false;
+        string? saleObservationText = null;
+        if (!string.IsNullOrWhiteSpace(request.Description) || !string.IsNullOrWhiteSpace(request.Observations))
         {
             var protocol = !string.IsNullOrWhiteSpace(request.LocalProtocol)
                 ? request.LocalProtocol
@@ -488,14 +521,25 @@ public sealed class LuxusParceirosIntegrationService
             {
                 protocol = mapping.GetStringOrEmpty("external_request_id");
             }
-            var saleBlock = BuildParceirosOriginBlock(
+            var description = !string.IsNullOrWhiteSpace(request.Observations)
+                ? request.Observations
+                : request.Description;
+            saleObservationText = BuildParceirosOriginBlock(
                 protocol,
                 request.PartnerName,
                 request.BranchName,
                 request.RequesterName,
                 request.RequesterEmail,
-                request.Description);
-            observacoes = MergeParceirosObservacoes(currentObs, saleBlock);
+                description);
+            shouldAddSaleObservation = true;
+
+            // Se Instruções ainda misturam o bloco Parceiros, limpa para ficar só o prefixo (template).
+            if (!string.IsNullOrWhiteSpace(currentObs)
+                && currentObs.IndexOf(ParceirosOriginMarker, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                var idx = currentObs.IndexOf(ParceirosOriginMarker, StringComparison.OrdinalIgnoreCase);
+                observacoes = currentObs[..idx].TrimEnd();
+            }
         }
 
         JsonElement? prazoElement = null;
@@ -509,21 +553,36 @@ public sealed class LuxusParceirosIntegrationService
             prazoElement = JsonSerializer.SerializeToElement(deadline.ToString("yyyy-MM-dd"));
         }
 
-        if (assunto is null && observacoes is null && prazoElement is null)
+        if (assunto is null && observacoes is null && prazoElement is null && !shouldAddSaleObservation)
         {
             throw new InvalidOperationException("Informe assunto, instruções ou prazo para atualizar.");
         }
 
-        return await _demandas.UpdateAsync(
-            technicalUserId,
-            demandaId,
-            new UpdateDemandaRequest
-            {
-                Assunto = assunto,
-                ObservacoesGerais = observacoes,
-                Prazo = prazoElement,
-            },
-            cancellationToken);
+        object? updated = null;
+        if (assunto is not null || observacoes is not null || prazoElement is not null)
+        {
+            updated = await _demandas.UpdateAsync(
+                technicalUserId,
+                demandaId,
+                new UpdateDemandaRequest
+                {
+                    Assunto = assunto,
+                    ObservacoesGerais = observacoes,
+                    Prazo = prazoElement,
+                },
+                cancellationToken);
+        }
+
+        if (shouldAddSaleObservation && !string.IsNullOrWhiteSpace(saleObservationText))
+        {
+            await EnsureParceirosSaleObservationAsync(
+                technicalUserId,
+                demandaId,
+                saleObservationText,
+                cancellationToken);
+        }
+
+        return updated ?? await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
     }
 
     public async Task<object> UpdateSaleStageAsync(
@@ -1370,6 +1429,51 @@ public sealed class LuxusParceirosIntegrationService
         !string.IsNullOrWhiteSpace(assunto)
         && Regex.IsMatch(assunto, @"venda\s+linha\s+nova", RegexOptions.IgnoreCase);
 
+    private static bool HasNomeLinhaPlaceholder(string? assunto) =>
+        !string.IsNullOrWhiteSpace(assunto) && NomeLinhaPlaceholderRegex.IsMatch(assunto);
+
+    private static string ReplaceNomeLinhaPlaceholder(string assunto, string subject) =>
+        NomeLinhaPlaceholderRegex.Replace(assunto, subject.Trim()).Trim();
+
+    private static string? InferSubjectFromParceirosBlock(string? observacoes)
+    {
+        if (string.IsNullOrWhiteSpace(observacoes))
+        {
+            return null;
+        }
+
+        var nome = Regex.Match(
+            observacoes,
+            @"^Nome\s+(.+)\s*$",
+            RegexOptions.Multiline | RegexOptions.IgnoreCase);
+        var linha = Regex.Match(
+            observacoes,
+            @"^Linha\s+do\s+chip\s+(.+)\s*$",
+            RegexOptions.Multiline | RegexOptions.IgnoreCase);
+        if (!linha.Success)
+        {
+            linha = Regex.Match(
+                observacoes,
+                @"^Numero\s+novo\s+(.+)\s*$",
+                RegexOptions.Multiline | RegexOptions.IgnoreCase);
+        }
+
+        if (!nome.Success)
+        {
+            return null;
+        }
+
+        var clientName = nome.Groups[1].Value.Trim();
+        var digits = linha.Success
+            ? Regex.Replace(linha.Groups[1].Value, @"\D", string.Empty)
+            : string.Empty;
+        if (string.IsNullOrWhiteSpace(digits))
+        {
+            digits = "semlinha";
+        }
+        return string.IsNullOrWhiteSpace(clientName) ? null : $"{clientName} {digits}";
+    }
+
     private static string ResolvePartnerBrand(string? partnerName)
     {
         var value = (partnerName ?? string.Empty).Trim();
@@ -1389,7 +1493,8 @@ public sealed class LuxusParceirosIntegrationService
     private static string BuildSaleAssuntoFromTemplate(
         TemplateDemandaSource template,
         string? partnerName,
-        string? localProtocol)
+        string? localProtocol,
+        string? subject = null)
     {
         var brand = ResolvePartnerBrand(partnerName);
         var source = !string.IsNullOrWhiteSpace(template.AssuntoTemplate)
@@ -1410,6 +1515,18 @@ public sealed class LuxusParceirosIntegrationService
             @"(?<=-\s*)PARCEIRO(?=\s*-)",
             brand,
             RegexOptions.IgnoreCase);
+        if (!string.IsNullOrWhiteSpace(subject))
+        {
+            var cleanSubject = subject.Trim();
+            if (HasNomeLinhaPlaceholder(assunto))
+            {
+                assunto = ReplaceNomeLinhaPlaceholder(assunto, cleanSubject);
+            }
+            else if (assunto.IndexOf(cleanSubject, StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                assunto = $"{assunto} {cleanSubject}";
+            }
+        }
         if (!string.IsNullOrWhiteSpace(localProtocol)
             && assunto.IndexOf(localProtocol, StringComparison.OrdinalIgnoreCase) < 0)
         {
@@ -1544,8 +1661,12 @@ public sealed class LuxusParceirosIntegrationService
             .Where(item => !string.IsNullOrWhiteSpace(item.UserId) && !existingUserIds.Contains(item.UserId))
             .ToList();
 
-        var needAssunto = !LooksLikeParceirosSaleTemplateAssunto(currentAssunto);
-        var needObs = !HasTemplateObservations(currentObs, template.ObservacoesGeraisTemplate);
+        var needAssuntoPlaceholder = HasNomeLinhaPlaceholder(currentAssunto);
+        var needAssuntoMissing = !LooksLikeParceirosSaleTemplateAssunto(currentAssunto);
+        var needAssunto = needAssuntoPlaceholder || needAssuntoMissing;
+        var hasSaleBlockInInstructions = currentObs.IndexOf(ParceirosOriginMarker, StringComparison.OrdinalIgnoreCase) >= 0;
+        var needObs = !HasTemplateObservations(currentObs, template.ObservacoesGeraisTemplate)
+                      || hasSaleBlockInInstructions;
         if (!needAssunto && !needObs && missingSubtarefas.Count == 0
             && missingSetores.Count == 0 && missingResponsaveis.Count == 0)
         {
@@ -1554,17 +1675,42 @@ public sealed class LuxusParceirosIntegrationService
 
         var protocol = mapping.GetStringOrEmpty("external_protocol");
         var partnerName = ExtractPartnerName(currentAssunto, currentObs);
+        var externalRequestId = mapping.GetStringOrEmpty("external_request_id");
+        var saleSummary = await FetchPartnerSaleSummaryAsync(externalRequestId, cancellationToken);
+        if (saleSummary is not null)
+        {
+            if (string.IsNullOrWhiteSpace(partnerName) && !string.IsNullOrWhiteSpace(saleSummary.PartnerName))
+            {
+                partnerName = saleSummary.PartnerName;
+            }
+        }
+
         var updates = new Dictionary<string, object?>();
         if (needAssunto)
         {
-            updates["assunto"] = BuildSaleAssuntoFromTemplate(template, partnerName, protocol);
+            var subject = saleSummary?.Subject;
+            if (needAssuntoPlaceholder && !string.IsNullOrWhiteSpace(subject))
+            {
+                updates["assunto"] = ReplaceNomeLinhaPlaceholder(currentAssunto, subject);
+            }
+            else if (needAssuntoMissing)
+            {
+                updates["assunto"] = BuildSaleAssuntoFromTemplate(template, partnerName, protocol, subject);
+            }
+            else if (needAssuntoPlaceholder && string.IsNullOrWhiteSpace(subject))
+            {
+                // Sem subject no Parceiros: tenta extrair cliente do bloco de origem já gravado.
+                var inferred = InferSubjectFromParceirosBlock(currentObs);
+                if (!string.IsNullOrWhiteSpace(inferred))
+                {
+                    updates["assunto"] = ReplaceNomeLinhaPlaceholder(currentAssunto, inferred);
+                }
+            }
         }
         if (needObs)
         {
-            var saleBlock = ExtractParceirosSaleBlock(currentObs, protocol, partnerName);
-            updates["observacoes_gerais"] = MergeParceirosObservacoes(
-                template.ObservacoesGeraisTemplate,
-                saleBlock);
+            // Instruções = só o template; bloco da venda sai para a tabela observacao.
+            updates["observacoes_gerais"] = template.ObservacoesGeraisTemplate ?? string.Empty;
         }
         if (updates.Count > 0)
         {
@@ -1573,6 +1719,30 @@ public sealed class LuxusParceirosIntegrationService
                 "Demanda",
                 $"id=eq.{Uri.EscapeDataString(demandaId)}",
                 updates,
+                cancellationToken);
+        }
+
+        var saleBlock = hasSaleBlockInInstructions
+            ? ExtractParceirosSaleBlock(currentObs, protocol, partnerName)
+            : null;
+        if (string.IsNullOrWhiteSpace(saleBlock) && saleSummary is not null
+            && !string.IsNullOrWhiteSpace(saleSummary.Observations))
+        {
+            saleBlock = BuildParceirosOriginBlock(
+                protocol,
+                partnerName ?? saleSummary.PartnerName,
+                null,
+                null,
+                null,
+                saleSummary.Observations);
+        }
+        if (!string.IsNullOrWhiteSpace(saleBlock))
+        {
+            var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
+            await EnsureParceirosSaleObservationAsync(
+                technicalUserId,
+                demandaId,
+                saleBlock,
                 cancellationToken);
         }
 
@@ -1689,6 +1859,24 @@ public sealed class LuxusParceirosIntegrationService
         var existing = await _supabase.FindUserByEmailAsync(email, cancellationToken);
         if (existing is not null)
         {
+            var needsRename = !string.Equals(
+                existing.Name?.Trim(),
+                TechnicalUserDisplayName,
+                StringComparison.Ordinal);
+            // Precisa aparecer no filtro Criador (dropdown só lista active=true).
+            var needsActivate = !existing.Active;
+            if (needsRename || needsActivate)
+            {
+                await _supabase.UpdateSingleAsync(
+                    "User",
+                    $"id=eq.{Uri.EscapeDataString(existing.Id)}",
+                    new
+                    {
+                        name = TechnicalUserDisplayName,
+                        active = true,
+                    },
+                    cancellationToken);
+            }
             return existing.Id;
         }
         var row = await _supabase.InsertSingleAsync(
@@ -1696,12 +1884,125 @@ public sealed class LuxusParceirosIntegrationService
             new
             {
                 email,
-                name = "LUXUSPARCEIROS",
-                active = false,
+                name = TechnicalUserDisplayName,
+                active = true,
                 password_hash = BCrypt.Net.BCrypt.HashPassword(Guid.NewGuid().ToString("N")),
             },
             cancellationToken);
         return row.GetStringOrEmpty("id");
+    }
+
+    private async Task EnsureParceirosSaleObservationAsync(
+        string technicalUserId,
+        string demandaId,
+        string saleBlock,
+        CancellationToken cancellationToken)
+    {
+        var trimmed = saleBlock.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            return;
+        }
+
+        var existing = await _supabase.QueryRowsAsync(
+            $"observacao?select=id,texto&demanda_id=eq.{Uri.EscapeDataString(demandaId)}&order=created_at.asc&limit=100",
+            cancellationToken);
+        var alreadyPresent = existing.Any(row =>
+        {
+            var texto = row.GetStringOrEmpty("texto");
+            return texto.IndexOf(ParceirosOriginMarker, StringComparison.OrdinalIgnoreCase) >= 0
+                   || string.Equals(texto.Trim(), trimmed, StringComparison.Ordinal);
+        });
+        if (alreadyPresent)
+        {
+            return;
+        }
+
+        try
+        {
+            await _demandas.AddObservacaoAsync(technicalUserId, demandaId, trimmed, cancellationToken);
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine(
+                $"[luxus-parceiros] Falha ao gravar observação Parceiros na demanda {demandaId}: {error.Message}");
+        }
+    }
+
+    private sealed record PartnerSaleSummary(
+        string? Subject,
+        string? Observations,
+        string? PartnerName,
+        string? ClientName);
+
+    private async Task<PartnerSaleSummary?> FetchPartnerSaleSummaryAsync(
+        string? saleId,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(saleId) || !Guid.TryParse(saleId, out _))
+        {
+            return null;
+        }
+
+        try
+        {
+            var httpClient = _httpClientFactory.CreateClient();
+            var configured = string.IsNullOrWhiteSpace(_options.LuxusParceirosCallbackUrl)
+                ? DefaultLuxusParceirosCallbackUrl
+                : _options.LuxusParceirosCallbackUrl;
+            if (!Uri.TryCreate(configured, UriKind.Absolute, out var callback))
+            {
+                return null;
+            }
+
+            var path = callback.AbsolutePath.TrimEnd('/');
+            const string callbackSuffix = "/callback";
+            if (path.EndsWith(callbackSuffix, StringComparison.OrdinalIgnoreCase))
+                path = path[..^callbackSuffix.Length];
+            var summaryUrl = new UriBuilder(callback)
+            {
+                Path = $"{path}/sales/{Uri.EscapeDataString(saleId)}",
+                Query = string.Empty,
+            }.Uri;
+
+            using var message = new HttpRequestMessage(HttpMethod.Get, summaryUrl);
+            message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
+            using var response = await httpClient.SendAsync(message, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null;
+            }
+
+            var payload = await response.Content.ReadAsStringAsync(cancellationToken);
+            using var json = JsonDocument.Parse(payload);
+            var root = json.RootElement;
+            if (root.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var property in root.EnumerateObject())
+                {
+                    if (string.Equals(property.Name, "data", StringComparison.OrdinalIgnoreCase)
+                        && property.Value.ValueKind == JsonValueKind.Object)
+                    {
+                        root = property.Value.Clone();
+                        break;
+                    }
+                }
+            }
+
+            return new PartnerSaleSummary(
+                ReadString(root, "subject"),
+                !string.IsNullOrWhiteSpace(ReadString(root, "observations"))
+                    ? ReadString(root, "observations")
+                    : ReadString(root, "description"),
+                ReadString(root, "partnerName"),
+                ReadString(root, "clientName"));
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine(
+                $"[luxus-parceiros] Falha ao buscar resumo da venda {saleId}: {error.Message}");
+            return null;
+        }
     }
 
     private async Task<JsonElement?> FindMappingByExternalIdAsync(

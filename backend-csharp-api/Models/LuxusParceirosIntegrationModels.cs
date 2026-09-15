@@ -30,6 +30,12 @@ public sealed class CreateLuxusParceirosDemandaRequest
     [Required]
     public string Description { get; init; } = string.Empty;
 
+    /// <summary>Dados da venda/cliente — vão para a tabela de observações, não para Instruções.</summary>
+    public string? Observations { get; init; }
+
+    /// <summary>Instruções extras; em vendas com template, prevalece o texto nativo do modelo.</summary>
+    public string? Instructions { get; init; }
+
     [Required]
     public string LocalProtocol { get; init; } = string.Empty;
 
@@ -44,6 +50,9 @@ public sealed class CreateLuxusParceirosDemandaRequest
     [Required]
     [EmailAddress]
     public string RequesterEmail { get; init; } = string.Empty;
+
+    /// <summary>Nome exibido como criador (filtro Criador). O usuário técnico é sempre o criador_id.</summary>
+    public string? CreatorName { get; init; }
 
     public bool? Priority { get; init; }
 
@@ -99,6 +108,8 @@ public sealed class UpdateLuxusParceirosDemandDetailsRequest
     public string? Subject { get; init; }
 
     public string? Description { get; init; }
+
+    public string? Observations { get; init; }
 
     /// <summary>Prazo no formato yyyy-MM-dd. Não pode ser anterior a hoje.</summary>
     public string? Deadline { get; init; }
