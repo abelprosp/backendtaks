@@ -924,6 +924,34 @@ public sealed class LuxusParceirosIntegrationService
 
         try
         {
+            using (var demandDocument = JsonDocument.Parse(JsonSerializer.Serialize(currentDemand)))
+            {
+                var demandStatus = ReadString(demandDocument.RootElement, "status");
+                var isSale = string.Equals(mapping.GetNullableString("entity_type"), "sale", StringComparison.OrdinalIgnoreCase);
+                var currentStage = mapping.GetNullableString("workflow_stage") ?? string.Empty;
+                if (isSale
+                    && string.Equals(demandStatus, "concluido", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(currentStage, "COMPLETED", StringComparison.OrdinalIgnoreCase))
+                {
+                    await _supabase.UpdateSingleAsync(
+                        "luxus_parceiros_demanda",
+                        $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
+                        new
+                        {
+                            workflow_stage = "COMPLETED",
+                            updated_at = DateTimeOffset.UtcNow,
+                        },
+                        cancellationToken);
+                    var refreshed = await _supabase.QueryRowsAsync(
+                        $"luxus_parceiros_demanda?select=*&demanda_id=eq.{Uri.EscapeDataString(demandaId)}&limit=1",
+                        cancellationToken);
+                    var refreshedMapping = refreshed.FirstOrDefault();
+                    if (refreshedMapping.ValueKind != JsonValueKind.Undefined)
+                    {
+                        mapping = refreshedMapping;
+                    }
+                }
+            }
             var payload = await BuildCallbackPayloadAsync(mapping, currentDemand, cancellationToken);
             var callbackUrl = string.IsNullOrWhiteSpace(_options.LuxusParceirosCallbackUrl)
                 ? DefaultLuxusParceirosCallbackUrl
@@ -1162,6 +1190,10 @@ public sealed class LuxusParceirosIntegrationService
         var workflowStage = isSaleWorkflow
             ? mapping.GetNullableString("workflow_stage") ?? "TASK_PROCESSING"
             : string.Empty;
+        if (isSaleWorkflow && string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase))
+        {
+            workflowStage = "COMPLETED";
+        }
         var sourceIds = mapping.GetArrayOrEmpty("source_attachment_ids")
             .Select(value => value.ValueKind == JsonValueKind.String ? value.GetString() : null)
             .Where(value => !string.IsNullOrWhiteSpace(value))
@@ -1180,8 +1212,7 @@ public sealed class LuxusParceirosIntegrationService
             })
             .Where(item => !string.IsNullOrWhiteSpace(item.id))
             .ToArray();
-        // status concluido/cancelado da demanda Task NÃO altera workflow_stage da venda.
-        // A venda no Parceiros só finaliza com Stage=COMPLETED explícito.
+        // status concluido da demanda Task envia workflowStage COMPLETED e conclui a venda no Parceiros.
         var resolution = taskResponses.Length > 0
             ? taskResponses[^1]
             : string.Equals(taskStatus, "concluido", StringComparison.OrdinalIgnoreCase)
