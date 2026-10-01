@@ -814,9 +814,12 @@ public sealed class LuxusParceirosIntegrationService
         var demandaId = mapping.GetStringOrEmpty("demanda_id");
         var demand = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
         using var demandJson = JsonDocument.Parse(JsonSerializer.Serialize(demand));
-        var existingNames = ReadArray(demandJson.RootElement, "anexos")
-            .Select(item => ReadString(item, "filename"))
-            .Where(value => !string.IsNullOrWhiteSpace(value))
+        var existingAnexos = ReadArray(demandJson.RootElement, "anexos")
+            .Select(item => (Id: ReadString(item, "id"), Filename: ReadString(item, "filename")))
+            .Where(item => !string.IsNullOrWhiteSpace(item.Filename))
+            .ToList();
+        var existingNames = existingAnexos
+            .Select(item => item.Filename)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var sourceAttachmentIds = mapping.GetArrayOrEmpty("source_attachment_ids")
             .Select(value => value.ValueKind == JsonValueKind.String ? value.GetString() : null)
@@ -838,13 +841,25 @@ public sealed class LuxusParceirosIntegrationService
             var shortId = document.Id.Replace("-", "");
             if (shortId.Length > 8) shortId = shortId[..8];
             var typedName = $"{document.Type}-{document.Name}";
-            if (existingNames.Any(name =>
-                    name.Contains(shortId, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(name, typedName, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(name, $"{document.Type}-{shortId}-{document.Name}", StringComparison.OrdinalIgnoreCase)))
+            var alreadyThere = existingAnexos
+                .Where(item =>
+                    item.Filename.Contains(shortId, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(item.Filename, typedName, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(item.Filename, $"{document.Type}-{shortId}-{document.Name}", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            foreach (var previous in alreadyThere)
             {
-                skipped++;
-                continue;
+                if (!string.IsNullOrWhiteSpace(previous.Id))
+                {
+                    await _supabase.DeleteAsync(
+                        "anexo",
+                        $"id=eq.{Uri.EscapeDataString(previous.Id)}",
+                        cancellationToken);
+                    sourceAttachmentIds.RemoveAll(id =>
+                        string.Equals(id, previous.Id, StringComparison.OrdinalIgnoreCase));
+                }
+                existingNames.Remove(previous.Filename);
+                existingAnexos.Remove(previous);
             }
             try
             {
@@ -870,6 +885,7 @@ public sealed class LuxusParceirosIntegrationService
                 var createdId = ReadString(createdJson.RootElement, "id");
                 if (!string.IsNullOrWhiteSpace(createdId)) sourceAttachmentIds.Add(createdId);
                 existingNames.Add(uniqueFilename);
+                existingAnexos.Add((createdId, uniqueFilename));
                 imported++;
             }
             catch (Exception error)
