@@ -169,6 +169,31 @@ public sealed class LuxusParceirosIntegrationController : ControllerBase
         catch (InvalidOperationException ex) { return BadRequest(new { message = ex.Message }); }
     }
 
+    [HttpDelete("demandas/{externalRequestId}/anexos/{documentId}")]
+    public async Task<IActionResult> RemoveDocument(
+        string externalRequestId,
+        string documentId,
+        [FromQuery] string? taskAttachmentId,
+        [FromQuery] string? documentType,
+        [FromQuery] string? documentName,
+        CancellationToken cancellationToken)
+    {
+        if (!_integration.IsAuthorized(Request.Headers["x-integration-key"]))
+            return Unauthorized(new { message = "Integração não autorizada" });
+        try
+        {
+            return Ok(await _integration.RemovePartnerDocumentAsync(
+                externalRequestId,
+                documentId,
+                taskAttachmentId,
+                documentType,
+                documentName,
+                cancellationToken));
+        }
+        catch (KeyNotFoundException ex) { return NotFound(new { message = ex.Message }); }
+        catch (InvalidOperationException ex) { return BadRequest(new { message = ex.Message }); }
+    }
+
     [HttpPost("notify/{demandaId}")]
     public async Task<IActionResult> Notify(string demandaId, CancellationToken cancellationToken)
     {

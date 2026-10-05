@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using LuxusDemandas.Api.Configuration;
 using LuxusDemandas.Api.Models;
@@ -15,6 +17,11 @@ public sealed class LuxusParceirosIntegrationService
         "https://luxusparceiros-production-df5d.up.railway.app/api/integrations/luxus-task/callback";
     private const string ParceirosOriginMarker = "Origem: Luxus Parceiros";
     private const string TechnicalUserDisplayName = "Luxus Parceiros";
+    private static readonly JsonSerializerOptions CallbackJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
     private static readonly Regex NomeLinhaPlaceholderRegex = new(
         @"\(\s*nome\s+e\s+n[uú]mero\s+da\s+linha\s*\)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -917,6 +924,68 @@ public sealed class LuxusParceirosIntegrationService
         return new { imported, skipped, failed, total = request.Documents.Count };
     }
 
+    public async Task<object> RemovePartnerDocumentAsync(
+        string externalRequestId,
+        string documentId,
+        string? taskAttachmentId,
+        string? documentType,
+        string? documentName,
+        CancellationToken cancellationToken)
+    {
+        var mapping = await FindMappingByExternalIdAsync(externalRequestId, cancellationToken)
+                      ?? throw new KeyNotFoundException("Demanda integrada não encontrada.");
+        var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
+        var demandaId = mapping.GetStringOrEmpty("demanda_id");
+        var demand = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
+        using var demandJson = JsonDocument.Parse(JsonSerializer.Serialize(demand));
+        var shortId = (documentId ?? string.Empty).Replace("-", "");
+        if (shortId.Length > 8) shortId = shortId[..8];
+        var typedName = string.IsNullOrWhiteSpace(documentType) || string.IsNullOrWhiteSpace(documentName)
+            ? string.Empty
+            : $"{documentType}-{documentName}";
+        var typedWithShortId = string.IsNullOrWhiteSpace(typedName) ? string.Empty : $"{documentType}-{shortId}-{documentName}";
+        var matches = ReadArray(demandJson.RootElement, "anexos")
+            .Select(item => (Id: ReadString(item, "id"), Filename: ReadString(item, "filename")))
+            .Where(item => !string.IsNullOrWhiteSpace(item.Id))
+            .Where(item =>
+                (!string.IsNullOrWhiteSpace(taskAttachmentId)
+                    && string.Equals(item.Id, taskAttachmentId, StringComparison.OrdinalIgnoreCase))
+                || (shortId.Length >= 8
+                    && item.Filename.Contains(shortId, StringComparison.OrdinalIgnoreCase))
+                || (!string.IsNullOrWhiteSpace(typedName)
+                    && string.Equals(item.Filename, typedName, StringComparison.OrdinalIgnoreCase))
+                || (!string.IsNullOrWhiteSpace(typedWithShortId)
+                    && string.Equals(item.Filename, typedWithShortId, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        var sourceAttachmentIds = mapping.GetArrayOrEmpty("source_attachment_ids")
+            .Select(value => value.ValueKind == JsonValueKind.String ? value.GetString() : null)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!)
+            .ToList();
+        var removed = 0;
+        foreach (var anexo in matches)
+        {
+            await _supabase.DeleteAsync(
+                "anexo",
+                $"id=eq.{Uri.EscapeDataString(anexo.Id)}",
+                cancellationToken);
+            sourceAttachmentIds.RemoveAll(id =>
+                string.Equals(id, anexo.Id, StringComparison.OrdinalIgnoreCase));
+            removed++;
+        }
+        if (removed > 0)
+        {
+            await _supabase.UpdateSingleAsync(
+                "luxus_parceiros_demanda",
+                $"id=eq.{Uri.EscapeDataString(mapping.GetStringOrEmpty("id"))}",
+                new { source_attachment_ids = sourceAttachmentIds.Distinct(StringComparer.OrdinalIgnoreCase).ToArray() },
+                cancellationToken);
+            var refreshed = await _demandas.FindOneAsync(technicalUserId, demandaId, cancellationToken);
+            await NotifyIfIntegratedAsync(demandaId, refreshed, cancellationToken);
+        }
+        return new { removed };
+    }
+
     public async Task NotifyByDemandaIdAsync(string demandaId, CancellationToken cancellationToken)
     {
         var technicalUserId = await EnsureTechnicalUserAsync(cancellationToken);
@@ -979,11 +1048,17 @@ public sealed class LuxusParceirosIntegrationService
                     HttpMethod.Post,
                     callbackUrl)
                 {
-                    Content = JsonContent.Create(payload),
+                    Content = JsonContent.Create(payload, options: CallbackJsonOptions),
                 };
                 message.Headers.Add("x-integration-key", _options.LuxusParceirosIntegrationKey);
                 using var response = await client.SendAsync(message, cancellationToken);
-                response.EnsureSuccessStatusCode();
+                if (!response.IsSuccessStatusCode)
+                {
+                    var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                    var detail = body.Length > 500 ? body[..500] : body;
+                    throw new InvalidOperationException(
+                        $"HTTP {(int)response.StatusCode}: {detail.Replace('\n', ' ').Replace('\r', ' ').Trim()}");
+                }
             }
             await _supabase.UpdateSingleAsync(
                 "luxus_parceiros_demanda",
@@ -1222,9 +1297,10 @@ public sealed class LuxusParceirosIntegrationService
                 name = string.IsNullOrWhiteSpace(ReadString(item, "displayName"))
                     ? ReadString(item, "filename")
                     : ReadString(item, "displayName"),
-                mimeType = ReadString(item, "mime_type"),
+                mimeType = NullIfBlank(ReadString(item, "mime_type")),
                 size = ReadLong(item, "size"),
-                createdAt = ReadString(item, "created_at"),
+                createdAt = OptionalIso(
+                    FirstPresent(ReadString(item, "created_at"), ReadString(item, "createdAt"))),
             })
             .Where(item => !string.IsNullOrWhiteSpace(item.id))
             .ToArray();
@@ -1239,19 +1315,19 @@ public sealed class LuxusParceirosIntegrationService
             externalRequestId = mapping.GetStringOrEmpty("external_request_id"),
             demandId = ReadString(root, "id"),
             protocol = ReadString(root, "protocolo"),
-            status = taskStatus,
-            workflowStage,
+            status = string.IsNullOrWhiteSpace(taskStatus) ? "em_andamento" : taskStatus,
+            workflowStage = NullIfBlank(workflowStage),
             // Sempre envia anexos criados no Task (exceto os que vieram do Parceiros).
             attachments = workflowAttachments,
-            resolution,
+            resolution = NullIfBlank(resolution),
             observations,
-            responsibleId = ReadString(user, "id"),
-            responsibleName = ReadString(user, "name"),
+            responsibleId = OptionalUuid(ReadString(user, "id")),
+            responsibleName = NullIfBlank(ReadString(user, "name")),
             isBeingEdited,
-            editorName,
-            editorActivity,
-            editorLastSeenAt,
-            updatedAt = ReadString(root, "updatedAt"),
+            editorName = NullIfBlank(editorName),
+            editorActivity = NullIfBlank(editorActivity),
+            editorLastSeenAt = OptionalIso(editorLastSeenAt),
+            updatedAt = OptionalIso(FirstPresent(ReadString(root, "updatedAt"), ReadString(root, "updated_at"))),
         };
     }
 
@@ -2062,6 +2138,27 @@ public sealed class LuxusParceirosIntegrationService
         var row = rows.FirstOrDefault();
         return row.ValueKind == JsonValueKind.Undefined ? null : row.Clone();
     }
+
+    private static string? NullIfBlank(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static string FirstPresent(string primary, string fallback) =>
+        string.IsNullOrWhiteSpace(primary) ? fallback : primary;
+
+    private static string? OptionalIso(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        return DateTimeOffset.TryParse(
+            value,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind,
+            out var parsed)
+            ? parsed.ToUniversalTime().ToString("o")
+            : null;
+    }
+
+    private static string? OptionalUuid(string? value) =>
+        Guid.TryParse(value, out var parsed) ? parsed.ToString() : null;
 
     private static string ReadString(JsonElement element, string name)
     {
